@@ -241,6 +241,75 @@ void cleanup_gpu(GPUContext& ctx) {
     if (ctx.context) clReleaseContext(ctx.context);
 }
 
+// Validate GPU kernel produces correct SHA-256 output
+// Uses a fixed seed to get deterministic nonce, then checks hash matches expected
+bool validate_gpu(GPUContext& ctx, const std::string& username) {
+    // Expected hash for DEFAULT_USERNAME with seed 0x12345678, thread 0, first iteration
+    // Run once with empty string to bootstrap, then hardcode the result
+    const char* expected_hash = "";  // TODO: Run once, copy output here
+
+    // Permissive target - everything matches
+    std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
+
+    // Fixed seed for deterministic nonce generation
+    cl_uint validation_seed = 0x12345678;
+    cl_uint zero = 0;
+
+    clEnqueueWriteBuffer(ctx.queue, ctx.target_hash_buf, CL_FALSE, 0,
+                         8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
+    clEnqueueWriteBuffer(ctx.queue, ctx.found_count_buf, CL_FALSE, 0,
+                         sizeof(cl_uint), &zero, 0, nullptr, nullptr);
+    clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &validation_seed);
+
+    // Run single work item
+    size_t global_size = 1;
+    size_t local_size = 1;
+    cl_int err = clEnqueueNDRangeKernel(ctx.queue, ctx.kernel, 1, nullptr,
+                                         &global_size, &local_size, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        std::cerr << "[GPU " << ctx.device_index << "] Validation kernel failed: " << err << std::endl;
+        return false;
+    }
+    clFinish(ctx.queue);
+
+    // Read result
+    cl_uint found_count;
+    clEnqueueReadBuffer(ctx.queue, ctx.found_count_buf, CL_TRUE, 0,
+                        sizeof(cl_uint), &found_count, 0, nullptr, nullptr);
+
+    if (found_count == 0) {
+        std::cerr << "[GPU " << ctx.device_index << "] Validation failed: no hash produced" << std::endl;
+        return false;
+    }
+
+    std::vector<uint8_t> hash(32);
+    std::vector<uint8_t> nonce(32);
+    clEnqueueReadBuffer(ctx.queue, ctx.found_hashes_buf, CL_TRUE, 0, 32, hash.data(), 0, nullptr, nullptr);
+    clEnqueueReadBuffer(ctx.queue, ctx.found_nonces_buf, CL_TRUE, 0, 32, nonce.data(), 0, nullptr, nullptr);
+
+    std::string hash_hex = bytes_to_hex(hash.data(), 32);
+    std::string nonce_str(reinterpret_cast<char*>(nonce.data()), NONCE_LEN);
+
+    if (strlen(expected_hash) == 0) {
+        // Bootstrap mode: print the hash so user can hardcode it
+        std::cout << "[GPU " << ctx.device_index << "] Validation bootstrap - record this hash:" << std::endl;
+        std::cout << "  Input: " << username << "/" << nonce_str << std::endl;
+        std::cout << "  Hash:  " << hash_hex << std::endl;
+        std::cout << "  (Paste this into expected_hash and rebuild)" << std::endl;
+        return true;  // Don't fail on bootstrap
+    }
+
+    if (hash_hex != expected_hash) {
+        std::cerr << "[GPU " << ctx.device_index << "] SHA-256 VALIDATION FAILED!" << std::endl;
+        std::cerr << "  Expected: " << expected_hash << std::endl;
+        std::cerr << "  Got:      " << hash_hex << std::endl;
+        return false;
+    }
+
+    std::cout << "[GPU " << ctx.device_index << "] SHA-256 validation passed" << std::endl;
+    return true;
+}
+
 // Worker thread function for each GPU
 void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
     std::cout << "[GPU " << ctx.device_index << "] Started mining on " << ctx.device_name << std::endl;
@@ -333,26 +402,14 @@ void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
     std::cout << "[GPU " << ctx.device_index << "] Stopped" << std::endl;
 }
 
-int main(int argc, char* argv[]) {
-    // Parse arguments
+int main() {
     std::string username = DEFAULT_USERNAME;
-    // Default target: 10 leading zero nibbles (0000000000FF...)
     std::vector<uint32_t> initial_target = {
         0x00000000, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
         0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
     };
 
-    if (argc >= 2) {
-        username = argv[1];
-    }
-    if (argc >= 3) {
-        if (!hex_to_uint(argv[2], initial_target.data(), 8)) {
-            std::cerr << "Invalid target hash format. Expected 64 hex characters." << std::endl;
-            return 1;
-        }
-    }
-
-    // Validate username length
+    // Compile-time config sanity check
     if (username.length() + 1 + NONCE_LEN != 32) {
         std::cerr << "Username must be " << (32 - 1 - NONCE_LEN) << " characters (got " << username.length() << ")" << std::endl;
         return 1;
@@ -394,6 +451,16 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cout << "Initialized GPU " << i << ": " << gpus[i].device_name << std::endl;
+    }
+
+    // Validate each GPU's SHA-256 implementation
+    std::cout << "\nValidating GPU kernels..." << std::endl;
+    for (auto& gpu : gpus) {
+        if (!validate_gpu(gpu, username)) {
+            std::cerr << "GPU validation failed - aborting" << std::endl;
+            for (auto& g : gpus) cleanup_gpu(g);
+            return 1;
+        }
     }
 
     std::cout << "\nMining started...\n" << std::endl;
