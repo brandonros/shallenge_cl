@@ -5,7 +5,7 @@ OpenCL + C++ = https://shallenge.quirino.net/
 
 ```shell
 export SSH_USERNAME="root"
-export SSH_PORT="55779"
+export SSH_PORT="49238"
 export SSH_HOST="70.69.213.236"
 
 # sync files
@@ -19,6 +19,6 @@ apt-get install -y xxd
 
 # build project
 cd shallenge_cl
-make DEFAULT_USERNAME=someone
-./output/challenge_cl
+make DEFAULT_USERNAME=brandonros GLOBAL_SIZE=2097152 LOCAL_SIZE=256 HASHES_PER_THREAD=256
+./output/shallenge_cl
 ```

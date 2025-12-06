@@ -1,7 +1,8 @@
 // Shallenge mining kernel
 // Note: This file is concatenated after sha256.cl, util.cl, and nonce.cl
 
-#define HASHES_PER_THREAD 64
+// HASHES_PER_THREAD is passed via -D at kernel compile time
+// No fallback - kernel build will fail if not defined
 
 __kernel void shallenge_mine(
     __global const uchar* restrict username,

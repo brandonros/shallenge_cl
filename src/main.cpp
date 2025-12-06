@@ -18,14 +18,17 @@
 
 #include "kernel.h"
 
-// Configuration
+// Configuration - must be provided via Makefile -D flags
+// No fallback defaults - build will fail if not defined
+
 const size_t USERNAME_LEN = sizeof(DEFAULT_USERNAME) - 1;  // -1 for null terminator
 const size_t SHA256_BLOCK_SIZE = 32;
 const size_t SEPARATOR_LEN = 1;
 const size_t NONCE_LEN = SHA256_BLOCK_SIZE - (USERNAME_LEN + SEPARATOR_LEN);
-const size_t GLOBAL_SIZE = 1024 * 1024;  // 1M threads per kernel launch
-const size_t LOCAL_SIZE = 256;           // Work-group size
-const size_t HASHES_PER_THREAD = 64;     // Inner loop iterations per thread
+
+// Stringify macro for passing defines to kernel
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
 
 // Per-GPU context
 struct GPUContext {
@@ -183,7 +186,9 @@ bool initialize_gpu(GPUContext& ctx, cl_device_id device, int device_index, cons
     ctx.program = clCreateProgramWithSource(ctx.context, 1, &src, &srcLen, &err);
     if (err != CL_SUCCESS) return false;
 
-    err = clBuildProgram(ctx.program, 1, &device, nullptr, nullptr, nullptr);
+    // Pass HASHES_PER_THREAD to kernel at compile time
+    const char* buildOpts = "-D HASHES_PER_THREAD=" TOSTRING(HASHES_PER_THREAD);
+    err = clBuildProgram(ctx.program, 1, &device, buildOpts, nullptr, nullptr);
     if (err != CL_SUCCESS) {
         char log[16384];
         clGetProgramBuildInfo(ctx.program, device, CL_PROGRAM_BUILD_LOG, sizeof(log), log, nullptr);
@@ -212,7 +217,7 @@ bool initialize_gpu(GPUContext& ctx, cl_device_id device, int device_index, cons
     clSetKernelArg(ctx.kernel, 5, sizeof(cl_mem), &ctx.found_hash_buf);
     clSetKernelArg(ctx.kernel, 6, sizeof(cl_mem), &ctx.found_nonce_buf);
     clSetKernelArg(ctx.kernel, 7, sizeof(cl_mem), &ctx.found_thread_buf);
-    clSetKernelArg(ctx.kernel, 8, sizeof(cl_uint) * 8, nullptr);
+    clSetKernelArg(ctx.kernel, 8, sizeof(cl_uint) * 8, nullptr);  // local memory for target
 
     std::random_device rd;
     ctx.rng.seed(rd() + static_cast<uint64_t>(device_index) * 0x9E3779B97F4A7C15ULL);
@@ -264,7 +269,7 @@ void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
         }
 
         clFinish(ctx.queue);
-        ctx.hashes_computed.fetch_add(GLOBAL_SIZE * HASHES_PER_THREAD);
+        ctx.hashes_computed.fetch_add(static_cast<uint64_t>(GLOBAL_SIZE) * HASHES_PER_THREAD);
 
         // Check for matches
         cl_uint found_count;
@@ -311,7 +316,11 @@ void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
 int main(int argc, char* argv[]) {
     // Parse arguments
     std::string username = DEFAULT_USERNAME;
-    std::vector<uint32_t> initial_target(8, 0xFFFFFFFF);
+    // Default target: 10 leading zero nibbles (0000000000FF...)
+    std::vector<uint32_t> initial_target = {
+        0x00000000, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+        0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    };
 
     if (argc >= 2) {
         username = argv[1];
