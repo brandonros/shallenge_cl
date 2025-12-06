@@ -1,7 +1,6 @@
 // Shallenge mining kernel
 // Note: This file is concatenated after sha256.cl, util.cl, and nonce.cl
 
-#define NONCE_LEN 21
 #define HASHES_PER_THREAD 64
 
 __kernel void shallenge_mine(
@@ -11,12 +10,15 @@ __kernel void shallenge_mine(
     uint rng_seed,                                 // 32-bit random seed from host
     __global uint* restrict found_count,           // atomic counter for matches found
     __global uchar* restrict found_hash,           // 32 bytes - best hash found
-    __global uchar* restrict found_nonce,          // 21 bytes - winning nonce
+    __global uchar* restrict found_nonce,          // winning nonce (32 - username_len - 1 bytes)
     __global uint* restrict found_thread_idx,      // which thread found it
     __local uint* restrict target_local            // local memory for target hash (8 uints)
 ) {
     uint thread_idx = (uint)get_global_id(0);      // 32-bit thread index
     int lid = get_local_id(0);
+
+    // Calculate nonce length from username length (total input must be 32 bytes)
+    uint nonce_len = 31 - username_len;  // 32 - username_len - 1 (for '/')
 
     // Load target hash into local memory (first 8 threads of each work-group)
     if (lid < 8) {
@@ -30,7 +32,6 @@ __kernel void shallenge_mine(
 
     // Prepare input buffer with username prefix (doesn't change)
     uchar input[32];
-    #pragma unroll
     for (uint i = 0; i < username_len; i++) {
         input[i] = username[i];
     }
@@ -39,7 +40,7 @@ __kernel void shallenge_mine(
     // Inner loop - hash multiple times per thread
     for (int iter = 0; iter < HASHES_PER_THREAD; iter++) {
         // Generate nonce directly into input buffer (no separate nonce array)
-        generate_nonce_from_state(&s0, &s1, &input[username_len + 1], NONCE_LEN);
+        generate_nonce_from_state(&s0, &s1, &input[username_len + 1], nonce_len);
 
         // Compute SHA-256
         uint hash[8];
@@ -59,8 +60,7 @@ __kernel void shallenge_mine(
             }
 
             // Copy nonce from input buffer
-            #pragma unroll
-            for (int i = 0; i < NONCE_LEN; i++) {
+            for (uint i = 0; i < nonce_len; i++) {
                 found_nonce[i] = input[username_len + 1 + i];
             }
 
