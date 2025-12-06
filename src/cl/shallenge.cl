@@ -4,14 +4,14 @@
 #define NONCE_LEN 21
 
 __kernel void shallenge_mine(
-    __global const uchar* username,      // e.g., "brandonros"
-    uint username_len,                    // e.g., 10
-    __global const uchar* target_hash,   // 32 bytes - current best to beat
-    ulong rng_seed,                       // random seed from host
-    __global uint* found_count,           // atomic counter for matches found
-    __global uchar* found_hash,           // 32 bytes - best hash found
-    __global uchar* found_nonce,          // 21 bytes - winning nonce
-    __global uint* found_thread_idx       // which thread found it
+    __global const uchar* restrict username,      // e.g., "brandonros"
+    uint username_len,                             // e.g., 10
+    __global const uchar* restrict target_hash,   // 32 bytes - current best to beat
+    ulong rng_seed,                                // random seed from host
+    __global uint* restrict found_count,           // atomic counter for matches found
+    __global uchar* restrict found_hash,           // 32 bytes - best hash found
+    __global uchar* restrict found_nonce,          // 21 bytes - winning nonce
+    __global uint* restrict found_thread_idx       // which thread found it
 ) {
     size_t thread_idx = get_global_id(0);
 
@@ -19,11 +19,11 @@ __kernel void shallenge_mine(
     uchar nonce[NONCE_LEN];
     generate_base64_nonce(thread_idx, rng_seed, nonce, NONCE_LEN);
 
-    // Build input: username + "/" + nonce
-    // Total length should be exactly 32 bytes (e.g., 10 + 1 + 21 = 32)
+    // Build input: username + "/" + nonce (32 bytes total)
     uchar input[32];
 
-    // Copy username
+    // Copy username (unrolled for common case of 10 chars)
+    #pragma unroll
     for (uint i = 0; i < username_len; i++) {
         input[i] = username[i];
     }
@@ -32,6 +32,7 @@ __kernel void shallenge_mine(
     input[username_len] = '/';
 
     // Copy nonce
+    #pragma unroll
     for (uint i = 0; i < NONCE_LEN; i++) {
         input[username_len + 1 + i] = nonce[i];
     }
@@ -40,8 +41,9 @@ __kernel void shallenge_mine(
     uchar hash[32];
     sha256_32(input, hash);
 
-    // Compare to target (need to copy target to local memory for comparison)
+    // Load target hash into private memory for faster comparison
     uchar target[32];
+    #pragma unroll
     for (int i = 0; i < 32; i++) {
         target[i] = target_hash[i];
     }
@@ -49,16 +51,16 @@ __kernel void shallenge_mine(
     // Check if this hash is better (lexicographically smaller)
     if (compare_hashes(hash, target) < 0) {
         // Found a better hash! Update outputs atomically
-
-        // Increment found count
         atomic_inc(found_count);
 
         // Copy hash (race condition is acceptable - we just want any better hash)
+        #pragma unroll
         for (int i = 0; i < 32; i++) {
             found_hash[i] = hash[i];
         }
 
         // Copy nonce
+        #pragma unroll
         for (int i = 0; i < NONCE_LEN; i++) {
             found_nonce[i] = nonce[i];
         }

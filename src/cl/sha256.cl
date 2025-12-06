@@ -1,7 +1,12 @@
 // SHA-256 implementation for OpenCL
 // Optimized for 32-byte input (single block)
+// Performance optimizations:
+// - OpenCL built-ins (rotate, bitselect)
+// - Macros for zero function-call overhead
+// - 16-word ring buffer to reduce register pressure
+// - Loop unrolling hints
 
-// SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes)
+// SHA-256 round constants
 __constant uint K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -13,49 +18,26 @@ __constant uint K[64] = {
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-// SHA-256 initial hash values (first 32 bits of fractional parts of square roots of first 8 primes)
-__constant uint H0[8] = {
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-};
+// SHA-256 helper macros using OpenCL built-ins
+// ch(x,y,z) = (x & y) ^ (~x & z) = bitselect(z, y, x)
+#define CH(x, y, z)    bitselect((z), (y), (x))
+#define MAJ(x, y, z)   (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
 
-// Rotate right
-inline uint rotr32(uint x, uint n) {
-    return (x >> n) | (x << (32 - n));
-}
+// Big sigma functions (rotate uses left rotation, so we compute 32-n)
+#define BSIG0(x)       (rotate((x), 30u) ^ rotate((x), 19u) ^ rotate((x), 10u))
+#define BSIG1(x)       (rotate((x), 26u) ^ rotate((x), 21u) ^ rotate((x), 7u))
 
-// SHA-256 helper functions
-inline uint ch(uint x, uint y, uint z) {
-    return (x & y) ^ (~x & z);
-}
-
-inline uint maj(uint x, uint y, uint z) {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-
-inline uint big_sigma0(uint x) {
-    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
-}
-
-inline uint big_sigma1(uint x) {
-    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
-}
-
-inline uint small_sigma0(uint x) {
-    return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
-}
-
-inline uint small_sigma1(uint x) {
-    return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
-}
+// Small sigma functions
+#define SSIG0(x)       (rotate((x), 25u) ^ rotate((x), 14u) ^ ((x) >> 3))
+#define SSIG1(x)       (rotate((x), 15u) ^ rotate((x), 13u) ^ ((x) >> 10))
 
 // SHA-256 for exactly 32-byte input
-// Input: 32 bytes in 'input' array
-// Output: 32 bytes in 'output' array
-void sha256_32(const uchar* input, uchar* output) {
-    uint w[64];
+// Uses 16-word ring buffer to reduce register pressure
+void sha256_32(const uchar* restrict input, uchar* restrict output) {
+    uint w[16];
 
-    // Copy 32 bytes of input to first 8 words (big-endian)
+    // Load first 8 words from input (big-endian)
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
         w[i] = ((uint)input[i*4] << 24) |
                ((uint)input[i*4+1] << 16) |
@@ -63,38 +45,43 @@ void sha256_32(const uchar* input, uchar* output) {
                ((uint)input[i*4+3]);
     }
 
-    // Padding for 32-byte (256-bit) message:
-    // Byte 32: 0x80 (1 bit followed by zeros)
-    // Bytes 33-61: 0x00
-    // Bytes 62-63: length in bits = 256 = 0x0100
-    w[8] = 0x80000000;
-    w[9] = 0;
-    w[10] = 0;
-    w[11] = 0;
-    w[12] = 0;
-    w[13] = 0;
-    w[14] = 0;
-    w[15] = 256;  // 32 bytes = 256 bits
+    // Padding for 32-byte message
+    w[8]  = 0x80000000u;
+    w[9]  = 0u;
+    w[10] = 0u;
+    w[11] = 0u;
+    w[12] = 0u;
+    w[13] = 0u;
+    w[14] = 0u;
+    w[15] = 256u;  // 32 bytes = 256 bits
 
-    // Extend the first 16 words into remaining 48 words
-    for (int i = 16; i < 64; i++) {
-        w[i] = small_sigma1(w[i-2]) + w[i-7] + small_sigma0(w[i-15]) + w[i-16];
-    }
+    // Initialize working variables from initial hash values
+    uint a = 0x6a09e667u;
+    uint b = 0xbb67ae85u;
+    uint c = 0x3c6ef372u;
+    uint d = 0xa54ff53au;
+    uint e = 0x510e527fu;
+    uint f = 0x9b05688cu;
+    uint g = 0x1f83d9abu;
+    uint h = 0x5be0cd19u;
 
-    // Initialize working variables
-    uint a = H0[0];
-    uint b = H0[1];
-    uint c = H0[2];
-    uint d = H0[3];
-    uint e = H0[4];
-    uint f = H0[5];
-    uint g = H0[6];
-    uint h = H0[7];
-
-    // Main compression loop - 64 rounds
+    // Main compression loop - 64 rounds with ring buffer
+    #pragma unroll
     for (int i = 0; i < 64; i++) {
-        uint t1 = h + big_sigma1(e) + ch(e, f, g) + K[i] + w[i];
-        uint t2 = big_sigma0(a) + maj(a, b, c);
+        uint wi;
+        int j = i & 0xF;
+
+        if (i < 16) {
+            wi = w[j];
+        } else {
+            wi = w[j] = SSIG1(w[(j + 14) & 0xF]) +
+                        w[(j + 9) & 0xF] +
+                        SSIG0(w[(j + 1) & 0xF]) +
+                        w[j];
+        }
+
+        uint t1 = h + BSIG1(e) + CH(e, f, g) + K[i] + wi;
+        uint t2 = BSIG0(a) + MAJ(a, b, c);
 
         h = g;
         g = f;
@@ -106,29 +93,31 @@ void sha256_32(const uchar* input, uchar* output) {
         a = t1 + t2;
     }
 
-    // Add to initial hash values
-    uint hash[8];
-    hash[0] = H0[0] + a;
-    hash[1] = H0[1] + b;
-    hash[2] = H0[2] + c;
-    hash[3] = H0[3] + d;
-    hash[4] = H0[4] + e;
-    hash[5] = H0[5] + f;
-    hash[6] = H0[6] + g;
-    hash[7] = H0[7] + h;
+    // Add initial hash values and store directly (fused)
+    uint h0 = 0x6a09e667u + a;
+    uint h1 = 0xbb67ae85u + b;
+    uint h2 = 0x3c6ef372u + c;
+    uint h3 = 0xa54ff53au + d;
+    uint h4 = 0x510e527fu + e;
+    uint h5 = 0x9b05688cu + f;
+    uint h6 = 0x1f83d9abu + g;
+    uint h7 = 0x5be0cd19u + h;
 
-    // Convert to bytes (big-endian)
-    for (int i = 0; i < 8; i++) {
-        output[i*4]   = (hash[i] >> 24) & 0xFF;
-        output[i*4+1] = (hash[i] >> 16) & 0xFF;
-        output[i*4+2] = (hash[i] >> 8) & 0xFF;
-        output[i*4+3] = hash[i] & 0xFF;
-    }
+    // Store output (big-endian)
+    output[0]  = (h0 >> 24); output[1]  = (h0 >> 16); output[2]  = (h0 >> 8); output[3]  = h0;
+    output[4]  = (h1 >> 24); output[5]  = (h1 >> 16); output[6]  = (h1 >> 8); output[7]  = h1;
+    output[8]  = (h2 >> 24); output[9]  = (h2 >> 16); output[10] = (h2 >> 8); output[11] = h2;
+    output[12] = (h3 >> 24); output[13] = (h3 >> 16); output[14] = (h3 >> 8); output[15] = h3;
+    output[16] = (h4 >> 24); output[17] = (h4 >> 16); output[18] = (h4 >> 8); output[19] = h4;
+    output[20] = (h5 >> 24); output[21] = (h5 >> 16); output[22] = (h5 >> 8); output[23] = h5;
+    output[24] = (h6 >> 24); output[25] = (h6 >> 16); output[26] = (h6 >> 8); output[27] = h6;
+    output[28] = (h7 >> 24); output[29] = (h7 >> 16); output[30] = (h7 >> 8); output[31] = h7;
 }
 
 // Compare two 32-byte hashes lexicographically
 // Returns: -1 if a < b, 0 if a == b, 1 if a > b
-int compare_hashes(const uchar* a, const uchar* b) {
+int compare_hashes(const uchar* restrict a, const uchar* restrict b) {
+    #pragma unroll
     for (int i = 0; i < 32; i++) {
         if (a[i] < b[i]) return -1;
         if (a[i] > b[i]) return 1;
