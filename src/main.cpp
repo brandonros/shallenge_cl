@@ -1,74 +1,22 @@
-#include <iostream>
-#include <vector>
-#include <random>
+#include "config.hpp"
+#include "core/hash_utils.hpp"
+#include "core/types.hpp"
+#include "gpu/device.hpp"
+#include "gpu/context.hpp"
+#include "mining/miner.hpp"
+#include "mining/validator.hpp"
+
 #include <chrono>
-#include <cstring>
-#include <iomanip>
-#include <sstream>
-#include <thread>
-#include <mutex>
-#include <atomic>
 #include <csignal>
+#include <iomanip>
+#include <iostream>
+#include <thread>
+#include <vector>
 
-#ifdef __APPLE__
-#include <OpenCL/opencl.h>
-#else
-#include <CL/cl.h>
-#endif
-
-#include "kernel.h"
-
-// Configuration - must be provided via Makefile -D flags
-// No fallback defaults - build will fail if not defined
-
-const size_t USERNAME_LEN = sizeof(DEFAULT_USERNAME) - 1;  // -1 for null terminator
-const size_t SHA256_BLOCK_SIZE = 32;
-const size_t SEPARATOR_LEN = 1;
-const size_t NONCE_LEN = SHA256_BLOCK_SIZE - (USERNAME_LEN + SEPARATOR_LEN);
-
-// Stringify macro for passing defines to kernel
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
-
-// Must match kernel's MAX_RESULTS
-const size_t MAX_RESULTS = 64;
-
-// Per-GPU context
-struct GPUContext {
-    int device_index;
-    std::string device_name;
-
-    cl_device_id device;
-    cl_context context;
-    cl_command_queue queue;
-    cl_program program;
-    cl_kernel kernel;
-
-    cl_mem username_buf;
-    cl_mem target_hash_buf;
-    cl_mem found_count_buf;
-    cl_mem found_hashes_buf;   // [MAX_RESULTS * 32] bytes
-    cl_mem found_nonces_buf;   // [MAX_RESULTS * 32] bytes
-
-    std::mt19937_64 rng;
-    std::atomic<uint64_t> hashes_computed{0};
-    std::atomic<uint64_t> matches_found{0};
-};
-
-// Shared state across all GPUs
-struct SharedState {
-    std::mutex best_hash_mutex;
-    std::vector<uint32_t> best_hash;
-    std::string best_nonce;
-
-    std::atomic<bool> running{true};
-
-    std::string username;
-    std::chrono::steady_clock::time_point start_time;
-};
+namespace {
 
 // Global pointer for signal handler
-SharedState* g_shared_state = nullptr;
+shallenge::SharedState* g_shared_state = nullptr;
 
 void signal_handler(int) {
     if (g_shared_state) {
@@ -77,337 +25,24 @@ void signal_handler(int) {
     }
 }
 
-// Convert bytes to hex string
-std::string bytes_to_hex(const uint8_t* data, size_t len) {
-    std::stringstream ss;
-    ss << std::hex << std::setfill('0');
-    for (size_t i = 0; i < len; i++) {
-        ss << std::setw(2) << static_cast<int>(data[i]);
-    }
-    return ss.str();
-}
-
-// Count leading zero nibbles
-int count_leading_zeros(const std::string& hex_string) {
-    int count = 0;
-    for (char c : hex_string) {
-        if (c == '0') count++;
-        else break;
-    }
-    return count;
-}
-
-// Convert uint32_t array to hex string (big-endian)
-std::string uint_to_hex(const uint32_t* data, size_t count) {
-    std::stringstream ss;
-    ss << std::hex << std::setfill('0');
-    for (size_t i = 0; i < count; i++) {
-        ss << std::setw(8) << data[i];
-    }
-    return ss.str();
-}
-
-// Parse hex string to uint32_t array (big-endian)
-bool hex_to_uint(const std::string& hex, uint32_t* out, size_t out_count) {
-    if (hex.length() != out_count * 8) return false;
-    for (size_t i = 0; i < out_count; i++) {
-        unsigned int word;
-        if (sscanf(hex.c_str() + i * 8, "%8x", &word) != 1) return false;
-        out[i] = static_cast<uint32_t>(word);
-    }
-    return true;
-}
-
-// Convert bytes to uint32_t array (big-endian)
-void bytes_to_uint(const uint8_t* bytes, uint32_t* out, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        out[i] = (static_cast<uint32_t>(bytes[i*4]) << 24) |
-                 (static_cast<uint32_t>(bytes[i*4+1]) << 16) |
-                 (static_cast<uint32_t>(bytes[i*4+2]) << 8) |
-                 static_cast<uint32_t>(bytes[i*4+3]);
-    }
-}
-
-// Compare two 8-word hashes lexicographically
-int compare_hashes_uint(const uint32_t* a, const uint32_t* b) {
-    for (int i = 0; i < 8; i++) {
-        if (a[i] < b[i]) return -1;
-        if (a[i] > b[i]) return 1;
-    }
-    return 0;
-}
-
-// Discover all available GPUs across all platforms
-std::vector<cl_device_id> discover_all_gpus() {
-    std::vector<cl_device_id> all_devices;
-
-    cl_uint num_platforms;
-    if (clGetPlatformIDs(0, nullptr, &num_platforms) != CL_SUCCESS || num_platforms == 0) {
-        return all_devices;
-    }
-
-    std::vector<cl_platform_id> platforms(num_platforms);
-    clGetPlatformIDs(num_platforms, platforms.data(), nullptr);
-
-    for (cl_platform_id platform : platforms) {
-        cl_uint num_devices;
-        if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, nullptr, &num_devices) == CL_SUCCESS && num_devices > 0) {
-            std::vector<cl_device_id> devices(num_devices);
-            clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, num_devices, devices.data(), nullptr);
-            all_devices.insert(all_devices.end(), devices.begin(), devices.end());
-        }
-    }
-
-    return all_devices;
-}
-
-// Initialize a single GPU context
-bool initialize_gpu(GPUContext& ctx, cl_device_id device, int device_index, const std::string& username) {
-    ctx.device_index = device_index;
-    ctx.device = device;
-
-    char name[256];
-    clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(name), name, nullptr);
-    ctx.device_name = name;
-
-    cl_int err;
-
-    ctx.context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
-    if (err != CL_SUCCESS) return false;
-
-#ifdef CL_VERSION_2_0
-    ctx.queue = clCreateCommandQueueWithProperties(ctx.context, device, nullptr, &err);
-#else
-    ctx.queue = clCreateCommandQueue(ctx.context, device, 0, &err);
-#endif
-    if (err != CL_SUCCESS) return false;
-
-    const char* src = reinterpret_cast<const char*>(output_kernel_combined_cl);
-    size_t srcLen = output_kernel_combined_cl_len;
-
-    ctx.program = clCreateProgramWithSource(ctx.context, 1, &src, &srcLen, &err);
-    if (err != CL_SUCCESS) return false;
-
-    // Pass HASHES_PER_THREAD to kernel at compile time
-    const char* buildOpts = "-D HASHES_PER_THREAD=" TOSTRING(HASHES_PER_THREAD);
-    err = clBuildProgram(ctx.program, 1, &device, buildOpts, nullptr, nullptr);
-    if (err != CL_SUCCESS) {
-        char log[16384];
-        clGetProgramBuildInfo(ctx.program, device, CL_PROGRAM_BUILD_LOG, sizeof(log), log, nullptr);
-        std::cerr << "[GPU " << device_index << "] Build error: " << log << std::endl;
-        return false;
-    }
-
-    ctx.kernel = clCreateKernel(ctx.program, "shallenge_mine", &err);
-    if (err != CL_SUCCESS) return false;
-
-    ctx.username_buf = clCreateBuffer(ctx.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                       username.length(), (void*)username.c_str(), &err);
-    ctx.target_hash_buf = clCreateBuffer(ctx.context, CL_MEM_READ_ONLY,
-                                          8 * sizeof(cl_uint), nullptr, &err);
-    ctx.found_count_buf = clCreateBuffer(ctx.context, CL_MEM_READ_WRITE,
-                                          sizeof(cl_uint), nullptr, &err);
-    ctx.found_hashes_buf = clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY,
-                                           MAX_RESULTS * 32, nullptr, &err);
-    ctx.found_nonces_buf = clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY,
-                                           MAX_RESULTS * 32, nullptr, &err);
-
-    cl_uint username_len = static_cast<cl_uint>(username.length());
-    clSetKernelArg(ctx.kernel, 0, sizeof(cl_mem), &ctx.username_buf);
-    clSetKernelArg(ctx.kernel, 1, sizeof(cl_uint), &username_len);
-    clSetKernelArg(ctx.kernel, 2, sizeof(cl_mem), &ctx.target_hash_buf);
-    // arg 3 (rng_seed) set per launch
-    clSetKernelArg(ctx.kernel, 4, sizeof(cl_mem), &ctx.found_count_buf);
-    clSetKernelArg(ctx.kernel, 5, sizeof(cl_mem), &ctx.found_hashes_buf);
-    clSetKernelArg(ctx.kernel, 6, sizeof(cl_mem), &ctx.found_nonces_buf);
-    clSetKernelArg(ctx.kernel, 7, sizeof(cl_uint) * 8, nullptr);  // local memory for target
-
-    std::random_device rd;
-    ctx.rng.seed(rd() + static_cast<uint64_t>(device_index) * 0x9E3779B97F4A7C15ULL);
-
-    return true;
-}
-
-// Cleanup GPU resources
-void cleanup_gpu(GPUContext& ctx) {
-    if (ctx.username_buf) clReleaseMemObject(ctx.username_buf);
-    if (ctx.target_hash_buf) clReleaseMemObject(ctx.target_hash_buf);
-    if (ctx.found_count_buf) clReleaseMemObject(ctx.found_count_buf);
-    if (ctx.found_hashes_buf) clReleaseMemObject(ctx.found_hashes_buf);
-    if (ctx.found_nonces_buf) clReleaseMemObject(ctx.found_nonces_buf);
-    if (ctx.kernel) clReleaseKernel(ctx.kernel);
-    if (ctx.program) clReleaseProgram(ctx.program);
-    if (ctx.queue) clReleaseCommandQueue(ctx.queue);
-    if (ctx.context) clReleaseContext(ctx.context);
-}
-
-// Validate GPU kernel produces correct SHA-256 output
-// Uses a fixed seed to get deterministic nonce, then checks hash matches expected
-bool validate_gpu(GPUContext& ctx, const std::string& username) {
-    // Expected hash for DEFAULT_USERNAME with seed 0x12345678, thread 0, first iteration
-    const char* expected_hash = "97ccae8eaf1245950067c7ed8d25ef7b17068c8930288ab6277ea058eeb73b49";
-
-    // Permissive target - everything matches
-    std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
-
-    // Fixed seed for deterministic nonce generation
-    cl_uint validation_seed = 0x12345678;
-    cl_uint zero = 0;
-
-    clEnqueueWriteBuffer(ctx.queue, ctx.target_hash_buf, CL_FALSE, 0,
-                         8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
-    clEnqueueWriteBuffer(ctx.queue, ctx.found_count_buf, CL_FALSE, 0,
-                         sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-    clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &validation_seed);
-
-    // Run single work item
-    size_t global_size = 1;
-    size_t local_size = 1;
-    cl_int err = clEnqueueNDRangeKernel(ctx.queue, ctx.kernel, 1, nullptr,
-                                         &global_size, &local_size, 0, nullptr, nullptr);
-    if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << ctx.device_index << "] Validation kernel failed: " << err << std::endl;
-        return false;
-    }
-    clFinish(ctx.queue);
-
-    // Read result
-    cl_uint found_count;
-    clEnqueueReadBuffer(ctx.queue, ctx.found_count_buf, CL_TRUE, 0,
-                        sizeof(cl_uint), &found_count, 0, nullptr, nullptr);
-
-    if (found_count == 0) {
-        std::cerr << "[GPU " << ctx.device_index << "] Validation failed: no hash produced" << std::endl;
-        return false;
-    }
-
-    std::vector<uint8_t> hash(32);
-    std::vector<uint8_t> nonce(32);
-    clEnqueueReadBuffer(ctx.queue, ctx.found_hashes_buf, CL_TRUE, 0, 32, hash.data(), 0, nullptr, nullptr);
-    clEnqueueReadBuffer(ctx.queue, ctx.found_nonces_buf, CL_TRUE, 0, 32, nonce.data(), 0, nullptr, nullptr);
-
-    std::string hash_hex = bytes_to_hex(hash.data(), 32);
-    std::string nonce_str(reinterpret_cast<char*>(nonce.data()), NONCE_LEN);
-
-    std::cout << "[GPU " << ctx.device_index << "] Validation (seed=0x" << std::hex << validation_seed << std::dec << "): "
-              << username << "/" << nonce_str << " -> " << hash_hex << std::endl;
-
-    if (hash_hex != expected_hash) {
-        std::cerr << "[GPU " << ctx.device_index << "] SHA-256 VALIDATION FAILED! Expected: " << expected_hash << std::endl;
-        return false;
-    }
-    return true;
-}
-
-// Worker thread function for each GPU
-void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
-    std::cout << "[GPU " << ctx.device_index << "] Started mining on " << ctx.device_name << std::endl;
-
-    while (shared.running.load()) {
-        // Get current best hash
-        std::vector<uint32_t> current_target(8);
-        {
-            std::lock_guard<std::mutex> lock(shared.best_hash_mutex);
-            current_target = shared.best_hash;
-        }
-
-        cl_uint rng_seed = static_cast<cl_uint>(ctx.rng());
-
-        // Reset found count and update target
-        cl_uint zero = 0;
-        clEnqueueWriteBuffer(ctx.queue, ctx.found_count_buf, CL_FALSE, 0, sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-        clEnqueueWriteBuffer(ctx.queue, ctx.target_hash_buf, CL_FALSE, 0, 8 * sizeof(cl_uint), current_target.data(), 0, nullptr, nullptr);
-
-        clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &rng_seed);
-
-        size_t global_size = GLOBAL_SIZE;
-        size_t local_size = LOCAL_SIZE;
-        cl_int err = clEnqueueNDRangeKernel(ctx.queue, ctx.kernel, 1, nullptr, &global_size, &local_size, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) {
-            std::cerr << "[GPU " << ctx.device_index << "] Kernel error: " << err << std::endl;
-            break;
-        }
-
-        clFinish(ctx.queue);
-        ctx.hashes_computed.fetch_add(static_cast<uint64_t>(GLOBAL_SIZE) * HASHES_PER_THREAD);
-
-        // Check for matches
-        cl_uint found_count;
-        clEnqueueReadBuffer(ctx.queue, ctx.found_count_buf, CL_TRUE, 0, sizeof(cl_uint), &found_count, 0, nullptr, nullptr);
-
-        if (found_count > 0) {
-            // Cap at MAX_RESULTS (kernel may have found more but only stored this many)
-            size_t results_to_read = std::min(static_cast<size_t>(found_count), MAX_RESULTS);
-
-            // Read all results
-            std::vector<uint8_t> all_hashes(results_to_read * 32);
-            std::vector<uint8_t> all_nonces(results_to_read * 32);
-
-            clEnqueueReadBuffer(ctx.queue, ctx.found_hashes_buf, CL_TRUE, 0,
-                               results_to_read * 32, all_hashes.data(), 0, nullptr, nullptr);
-            clEnqueueReadBuffer(ctx.queue, ctx.found_nonces_buf, CL_TRUE, 0,
-                               results_to_read * 32, all_nonces.data(), 0, nullptr, nullptr);
-
-            // Find the best result among all found
-            size_t best_idx = 0;
-            std::vector<uint32_t> best_hash_uint(8);
-            bytes_to_uint(all_hashes.data(), best_hash_uint.data(), 8);
-
-            for (size_t i = 1; i < results_to_read; i++) {
-                std::vector<uint32_t> this_hash_uint(8);
-                bytes_to_uint(all_hashes.data() + i * 32, this_hash_uint.data(), 8);
-
-                if (compare_hashes_uint(this_hash_uint.data(), best_hash_uint.data()) < 0) {
-                    best_idx = i;
-                    best_hash_uint = this_hash_uint;
-                }
-            }
-
-            // Try to update global best hash
-            {
-                std::lock_guard<std::mutex> lock(shared.best_hash_mutex);
-                if (compare_hashes_uint(best_hash_uint.data(), shared.best_hash.data()) < 0) {
-                    shared.best_hash = best_hash_uint;
-                    shared.best_nonce = std::string(
-                        reinterpret_cast<char*>(all_nonces.data() + best_idx * 32), NONCE_LEN);
-                    ctx.matches_found.fetch_add(1);
-
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - shared.start_time).count();
-
-                    std::cout << "\n[GPU " << ctx.device_index << "] NEW BEST FOUND!" << std::endl;
-                    std::cout << "  Hash: " << bytes_to_hex(all_hashes.data() + best_idx * 32, 32) << std::endl;
-                    std::cout << "  Zeroes: " << count_leading_zeros(bytes_to_hex(all_hashes.data() + best_idx * 32, 32)) << std::endl;
-                    std::cout << "  Nonce: " << shared.best_nonce << std::endl;
-                    std::cout << "  Challenge: " << shared.username << "/" << shared.best_nonce << std::endl;
-                    std::cout << "  Time: " << elapsed << "s elapsed" << std::endl;
-                    std::cout << "  (Found " << found_count << " candidates this batch)" << std::endl;
-                    std::cout << std::endl;
-                }
-            }
-        }
-    }
-
-    std::cout << "[GPU " << ctx.device_index << "] Stopped" << std::endl;
-}
+} // anonymous namespace
 
 int main() {
-    std::string username = DEFAULT_USERNAME;
-    std::vector<uint32_t> initial_target = {
-        0x00000000, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
-        0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
-    };
+    using namespace shallenge;
+
+    std::string username = config::username;
 
     // Compile-time config sanity check
-    if (username.length() + 1 + NONCE_LEN != 32) {
-        std::cerr << "Username must be " << (32 - 1 - NONCE_LEN) << " characters (got " << username.length() << ")" << std::endl;
+    if (username.length() + 1 + config::nonce_len != 32) {
+        std::cerr << "Username must be " << (32 - 1 - config::nonce_len)
+                  << " characters (got " << username.length() << ")" << std::endl;
         return 1;
     }
 
     // Initialize shared state
     SharedState shared;
     shared.username = username;
-    shared.best_hash = initial_target;
+    shared.best_hash = std::vector<uint32_t>(config::initial_target, config::initial_target + 8);
     shared.start_time = std::chrono::steady_clock::now();
     g_shared_state = &shared;
 
@@ -417,9 +52,9 @@ int main() {
 
     std::cout << "Shallenge Miner (OpenCL Multi-GPU)" << std::endl;
     std::cout << "Username: " << username << std::endl;
-    std::cout << "Initial target: " << uint_to_hex(initial_target.data(), 8) << std::endl;
-    std::cout << "Global size: " << GLOBAL_SIZE << " threads per launch per GPU" << std::endl;
-    std::cout << "Local size: " << LOCAL_SIZE << " threads per work-group" << std::endl;
+    std::cout << "Initial target: " << uint_to_hex(config::initial_target, 8) << std::endl;
+    std::cout << "Global size: " << config::global_size << " threads per launch per GPU" << std::endl;
+    std::cout << "Local size: " << config::local_size << " threads per work-group" << std::endl;
 
     // Discover all GPUs
     std::vector<cl_device_id> devices = discover_all_gpus();
@@ -429,17 +64,18 @@ int main() {
     }
     std::cout << "Found " << devices.size() << " GPU(s)" << std::endl;
 
-    // Initialize all GPUs
-    std::vector<GPUContext> gpus(devices.size());
+    // Initialize all GPUs (RAII handles cleanup automatically)
+    std::vector<GPUContext> gpus;
+    gpus.reserve(devices.size());
+
     for (size_t i = 0; i < devices.size(); i++) {
-        if (!initialize_gpu(gpus[i], devices[i], static_cast<int>(i), username)) {
+        auto ctx = create_gpu_context(devices[i], static_cast<int>(i), username);
+        if (!ctx) {
             std::cerr << "Failed to initialize GPU " << i << std::endl;
-            for (size_t j = 0; j < i; j++) {
-                cleanup_gpu(gpus[j]);
-            }
             return 1;
         }
-        std::cout << "Initialized GPU " << i << ": " << gpus[i].device_name << std::endl;
+        std::cout << "Initialized GPU " << i << ": " << ctx->device_name << std::endl;
+        gpus.push_back(std::move(*ctx));
     }
 
     // Validate each GPU's SHA-256 implementation
@@ -447,7 +83,6 @@ int main() {
     for (auto& gpu : gpus) {
         if (!validate_gpu(gpu, username)) {
             std::cerr << "GPU validation failed - aborting" << std::endl;
-            for (auto& g : gpus) cleanup_gpu(g);
             return 1;
         }
     }
@@ -517,10 +152,6 @@ int main() {
         std::cout << "  Challenge: " << username << "/" << shared.best_nonce << std::endl;
     }
 
-    // Cleanup
-    for (auto& gpu : gpus) {
-        cleanup_gpu(gpu);
-    }
-
+    // Cleanup happens automatically via RAII when gpus vector goes out of scope
     return 0;
 }
