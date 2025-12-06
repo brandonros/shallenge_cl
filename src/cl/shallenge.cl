@@ -1,7 +1,8 @@
 // Shallenge mining kernel
-// Note: This file is concatenated after sha256.cl and xoroshiro.cl
+// Note: This file is concatenated after sha256.cl and nonce.cl
 
 #define NONCE_LEN 21
+#define HASHES_PER_THREAD 64
 
 __kernel void shallenge_mine(
     __global const uchar* restrict username,      // e.g., "brandonros"
@@ -23,61 +24,63 @@ __kernel void shallenge_mine(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // Generate random nonce for this thread
-    uchar nonce[NONCE_LEN];
-    generate_base64_nonce(thread_idx, rng_seed, nonce, NONCE_LEN);
-
-    // Build input: username + "/" + nonce (32 bytes total)
-    uchar input[32];
-
-    // Copy username (unrolled for common case of 10 chars)
-    #pragma unroll
-    for (uint i = 0; i < username_len; i++) {
-        input[i] = username[i];
-    }
-
-    // Add separator
-    input[username_len] = '/';
-
-    // Copy nonce
-    #pragma unroll
-    for (uint i = 0; i < NONCE_LEN; i++) {
-        input[username_len + 1 + i] = nonce[i];
-    }
-
-    // Compute SHA-256 (returns uint[8] for efficient comparison)
-    uint hash[8];
-    sha256_32_uint(input, hash);
-
-    // Copy target from local to private memory for comparison
+    // Copy target from local to private memory for comparison (once per thread)
     uint target[8];
     #pragma unroll
     for (int i = 0; i < 8; i++) {
         target[i] = target_local[i];
     }
 
-    // Check if this hash is better using early-exit comparison
-    if (is_hash_better(hash, target)) {
-        // Found a better hash! Update outputs atomically
-        atomic_inc(found_count);
+    // Initialize RNG state ONCE per thread
+    ulong s0, s1;
+    init_rng_state(thread_idx, rng_seed, &s0, &s1);
 
-        // Convert hash to bytes for output (only done for winners)
-        uchar hash_bytes[32];
-        hash_uint_to_bytes(hash, hash_bytes);
+    // Prepare input buffer with username prefix (doesn't change)
+    uchar input[32];
+    #pragma unroll
+    for (uint i = 0; i < username_len; i++) {
+        input[i] = username[i];
+    }
+    input[username_len] = '/';
 
-        // Copy hash (race condition is acceptable - we just want any better hash)
+    // Inner loop - hash multiple times per thread
+    for (int iter = 0; iter < HASHES_PER_THREAD; iter++) {
+        // Generate nonce using RNG state
+        uchar nonce[NONCE_LEN];
+        generate_nonce_from_state(&s0, &s1, nonce, NONCE_LEN);
+
+        // Copy nonce to input
         #pragma unroll
-        for (int i = 0; i < 32; i++) {
-            found_hash[i] = hash_bytes[i];
+        for (uint i = 0; i < NONCE_LEN; i++) {
+            input[username_len + 1 + i] = nonce[i];
         }
 
-        // Copy nonce
-        #pragma unroll
-        for (int i = 0; i < NONCE_LEN; i++) {
-            found_nonce[i] = nonce[i];
-        }
+        // Compute SHA-256
+        uint hash[8];
+        sha256_32_uint(input, hash);
 
-        // Record which thread found it
-        *found_thread_idx = (uint)thread_idx;
+        // Check if this hash is better
+        if (is_hash_better(hash, target)) {
+            atomic_inc(found_count);
+
+            // Convert hash to bytes for output
+            uchar hash_bytes[32];
+            hash_uint_to_bytes(hash, hash_bytes);
+
+            // Copy hash (race condition is acceptable)
+            #pragma unroll
+            for (int i = 0; i < 32; i++) {
+                found_hash[i] = hash_bytes[i];
+            }
+
+            // Copy nonce
+            #pragma unroll
+            for (int i = 0; i < NONCE_LEN; i++) {
+                found_nonce[i] = nonce[i];
+            }
+
+            // Record which thread found it
+            *found_thread_idx = (uint)thread_idx;
+        }
     }
 }

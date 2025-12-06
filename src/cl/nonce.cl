@@ -21,42 +21,27 @@ inline ulong splitmix64(ulong x) {
     return x ^ (x >> 31);
 }
 
-// Generate a base64 nonce of fixed length (21 chars)
-// Inlined xoroshiro128** for maximum performance
-inline void generate_base64_nonce(size_t thread_idx, ulong rng_seed, uchar* restrict nonce, size_t nonce_len) {
-    // Mix seed with thread index using splitmix64
-    ulong mixed = rng_seed + (ulong)thread_idx;
-    mixed += 0x9e3779b97f4a7c15UL;
-    mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9UL;
-    mixed = (mixed ^ (mixed >> 27)) * 0x94d049bb133111ebUL;
-    mixed ^= (mixed >> 31);
+// Initialize RNG state once per thread (optimized - single splitmix64)
+inline void init_rng_state(size_t thread_idx, ulong rng_seed, ulong* s0, ulong* s1) {
+    ulong seed = splitmix64(rng_seed + (ulong)thread_idx);
+    *s0 = seed;
+    *s1 = seed ^ 0x1234567890ABCDEFULL;  // Cheap derivation, avoids zero state
+}
 
-    // Initialize xoroshiro128** state inline
-    ulong s0 = mixed;
-    s0 += 0x9e3779b97f4a7c15UL;
-    s0 = (s0 ^ (s0 >> 30)) * 0xbf58476d1ce4e5b9UL;
-    s0 = (s0 ^ (s0 >> 27)) * 0x94d049bb133111ebUL;
-    s0 ^= (s0 >> 31);
-
-    ulong s1 = s0;
-    s1 += 0x9e3779b97f4a7c15UL;
-    s1 = (s1 ^ (s1 >> 30)) * 0xbf58476d1ce4e5b9UL;
-    s1 = (s1 ^ (s1 >> 27)) * 0x94d049bb133111ebUL;
-    s1 ^= (s1 >> 31);
-
-    // Generate nonce characters
+// Generate nonce from existing RNG state (called multiple times per thread)
+inline void generate_nonce_from_state(ulong* s0, ulong* s1, uchar* restrict nonce, size_t nonce_len) {
     #pragma unroll
     for (size_t i = 0; i < nonce_len; i++) {
         // xoroshiro128** next: rotl(s0 * 5, 7) * 9
-        ulong result = ROTL64(s0 * 5, 7) * 9;
+        ulong result = ROTL64(*s0 * 5, 7) * 9;
 
         // State update
-        ulong t = s1 ^ s0;
-        s0 = ROTL64(s0, 24) ^ t ^ (t << 16);
-        s1 = ROTL64(t, 37);
+        ulong t = *s1 ^ *s0;
+        *s0 = ROTL64(*s0, 24) ^ t ^ (t << 16);
+        *s1 = ROTL64(t, 37);
 
         // Extract index (use upper 32 bits, then mod 64)
-        uint idx = ((uint)(result >> 32)) & 63;  // Faster than % 64 since 64 is power of 2
+        uint idx = ((uint)(result >> 32)) & 63;
         nonce[i] = BASE64_CHARS[idx];
     }
 }

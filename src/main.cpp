@@ -26,6 +26,7 @@ const size_t SEPARATOR_LEN = 1;
 const size_t NONCE_LEN = SHA256_BLOCK_SIZE - (USERNAME_LEN + SEPARATOR_LEN);
 const size_t GLOBAL_SIZE = 1024 * 1024;  // 1M threads per kernel launch
 const size_t LOCAL_SIZE = 256;           // Work-group size
+const size_t HASHES_PER_THREAD = 64;     // Inner loop iterations per thread
 
 // Per-GPU context
 struct GPUContext {
@@ -264,7 +265,7 @@ void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
         }
 
         clFinish(ctx.queue);
-        ctx.hashes_computed.fetch_add(GLOBAL_SIZE);
+        ctx.hashes_computed.fetch_add(GLOBAL_SIZE * HASHES_PER_THREAD);
 
         // Check for matches
         cl_uint found_count;
@@ -401,8 +402,10 @@ int main(int argc, char* argv[]) {
         last_total = total_hashes;
         last_time = now;
 
+        double per_gpu_rate = recent_rate / gpus.size();
+
         std::cout << "\r[Stats] " << std::fixed << std::setprecision(2)
-                  << (recent_rate / 1e6) << " MH/s, "
+                  << (recent_rate / 1e6) << " MH/s (" << (per_gpu_rate / 1e6) << " MH/s/GPU), "
                   << std::setprecision(3) << (total_hashes / 1e9) << "B hashes, "
                   << total_matches << " matches, "
                   << elapsed << "s elapsed" << std::flush;
