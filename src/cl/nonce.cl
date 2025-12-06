@@ -1,6 +1,6 @@
-// Xoroshiro128** RNG implementation for OpenCL
-// Used for generating random base64 nonces
-// Optimized with macros and inlining
+// xoroshiro64** RNG - 32-bit version for GPU efficiency
+// Batched extraction: 5 base64 chars per 32-bit value (5 * 6 = 30 bits)
+// For 21-char nonce: 5 RNG calls instead of 21
 
 __constant uchar BASE64_CHARS[64] = {
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
@@ -10,38 +10,51 @@ __constant uchar BASE64_CHARS[64] = {
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'
 };
 
-// Rotate left for 64-bit using macro
-#define ROTL64(x, k) (((x) << (k)) | ((x) >> (64 - (k))))
+// Rotate left for 32-bit
+#define ROTL32(x, k) (((x) << (k)) | ((x) >> (32 - (k))))
 
-// Splitmix64 - used to initialize xoroshiro state from a single seed
-inline ulong splitmix64(ulong x) {
-    x += 0x9e3779b97f4a7c15UL;
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9UL;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111ebUL;
-    return x ^ (x >> 31);
+// Splitmix32 - initialize state from seed
+inline uint splitmix32(uint x) {
+    x += 0x9e3779b9u;
+    x = (x ^ (x >> 16)) * 0x85ebca6bu;
+    x = (x ^ (x >> 13)) * 0xc2b2ae35u;
+    return x ^ (x >> 16);
 }
 
-// Initialize RNG state once per thread (optimized - single splitmix64)
-inline void init_rng_state(size_t thread_idx, ulong rng_seed, ulong* s0, ulong* s1) {
-    ulong seed = splitmix64(rng_seed + (ulong)thread_idx);
+// Initialize RNG state once per thread (32-bit state)
+inline void init_rng_state(size_t thread_idx, ulong rng_seed, uint* s0, uint* s1) {
+    // Mix thread_idx and seed into 32-bit values
+    uint seed = splitmix32((uint)rng_seed ^ (uint)thread_idx);
     *s0 = seed;
-    *s1 = seed ^ 0x1234567890ABCDEFULL;  // Cheap derivation, avoids zero state
+    seed = splitmix32(seed);
+    *s1 = seed;
+    // Ensure non-zero state
+    if (*s0 == 0 && *s1 == 0) *s0 = 1;
 }
 
-// Generate nonce from existing RNG state (called multiple times per thread)
-inline void generate_nonce_from_state(ulong* s0, ulong* s1, uchar* restrict nonce, size_t nonce_len) {
-    #pragma unroll
-    for (size_t i = 0; i < nonce_len; i++) {
-        // xoroshiro128** next: rotl(s0 * 5, 7) * 9
-        ulong result = ROTL64(*s0 * 5, 7) * 9;
+// xoroshiro64** next value
+inline uint xoroshiro64_next(uint* s0, uint* s1) {
+    uint result = ROTL32(*s0 * 0x9E3779BBu, 5) * 5;
 
-        // State update
-        ulong t = *s1 ^ *s0;
-        *s0 = ROTL64(*s0, 24) ^ t ^ (t << 16);
-        *s1 = ROTL64(t, 37);
+    uint t = *s1 ^ *s0;
+    *s0 = ROTL32(*s0, 26) ^ t ^ (t << 9);
+    *s1 = ROTL32(t, 13);
 
-        // Extract index (use upper 32 bits, then mod 64)
-        uint idx = ((uint)(result >> 32)) & 63;
-        nonce[i] = BASE64_CHARS[idx];
+    return result;
+}
+
+// Generate nonce with batched extraction
+// Each 32-bit value provides 5 base64 characters (30 bits used, 2 discarded)
+inline void generate_nonce_from_state(uint* s0, uint* s1, uchar* restrict nonce, size_t nonce_len) {
+    size_t i = 0;
+    while (i < nonce_len) {
+        uint bits = xoroshiro64_next(s0, s1);
+
+        // Extract up to 5 characters (6 bits each) from 32 bits
+        #pragma unroll
+        for (int j = 0; j < 5 && i < nonce_len; j++, i++) {
+            nonce[i] = BASE64_CHARS[bits & 63];
+            bits >>= 6;
+        }
     }
 }

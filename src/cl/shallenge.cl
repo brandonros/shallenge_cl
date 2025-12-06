@@ -31,8 +31,8 @@ __kernel void shallenge_mine(
         target[i] = target_local[i];
     }
 
-    // Initialize RNG state ONCE per thread
-    ulong s0, s1;
+    // Initialize RNG state ONCE per thread (32-bit for GPU efficiency)
+    uint s0, s1;
     init_rng_state(thread_idx, rng_seed, &s0, &s1);
 
     // Prepare input buffer with username prefix (doesn't change)
