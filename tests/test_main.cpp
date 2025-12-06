@@ -429,3 +429,85 @@ TEST_CASE("Nonce characters are valid base64", "[gpu][rng]") {
     INFO("Saw " << seen_chars.size() << " unique characters out of 64");
     REQUIRE(seen_chars.size() >= 50);  // At least ~78% coverage
 }
+
+TEST_CASE("Known result is reproducible from seed and thread index", "[gpu][reproducibility][critical]") {
+    auto gpu_opt = get_test_gpu();
+    if (!gpu_opt) {
+        WARN("No GPU available - skipping GPU tests");
+        return;
+    }
+    auto& gpu = *gpu_opt;
+
+    // Known good result from actual mining run:
+    // Seed: 0x2db3c8bf, ThreadIdx: 152577
+    // Hash: 00000000e26930bd9705edfac993fd780164a83dcf722b64cf7e0ee68a8b975a
+    // Nonce: Qcz7bqamNDiRNYb7Er7/A
+    const cl_uint known_seed = 0x2db3c8bf;
+    const cl_uint known_thread_idx = 152577;
+    const std::string expected_hash = "00000000e26930bd9705edfac993fd780164a83dcf722b64cf7e0ee68a8b975a";
+    const std::string expected_nonce = "Qcz7bqamNDiRNYb7Er7/A";
+
+    // Use a target that will accept our 8-zero hash but reject most others
+    // This limits results so we don't overflow the 64-slot buffer before reaching our thread
+    std::vector<uint32_t> target = {
+        0x00000001, 0x00000000, 0x00000000, 0x00000000,
+        0x00000000, 0x00000000, 0x00000000, 0x00000000
+    };
+    cl_uint zero = 0;
+
+    clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
+                         8 * sizeof(cl_uint), target.data(), 0, nullptr, nullptr);
+    clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
+                         sizeof(cl_uint), &zero, 0, nullptr, nullptr);
+    clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &known_seed);
+
+    // Run enough threads to include our target thread
+    // Need at least known_thread_idx + 1 threads, round up to multiple of local_size
+    size_t global_size = ((known_thread_idx / 256) + 1) * 256;
+    size_t local_size = 256;
+
+    cl_int err = clEnqueueNDRangeKernel(gpu.queue, gpu.kernel, 1, nullptr,
+                                         &global_size, &local_size, 0, nullptr, nullptr);
+    REQUIRE(err == CL_SUCCESS);
+    clFinish(gpu.queue);
+
+    // Read results
+    cl_uint found_count;
+    clEnqueueReadBuffer(gpu.queue, gpu.found_count_buf, CL_TRUE, 0,
+                        sizeof(cl_uint), &found_count, 0, nullptr, nullptr);
+
+    INFO("Found " << found_count << " results with restrictive target");
+    REQUIRE(found_count > 0);
+
+    size_t results_to_read = std::min(static_cast<size_t>(found_count), config::max_results);
+    std::vector<uint8_t> all_hashes(results_to_read * 32);
+    std::vector<uint8_t> all_nonces(results_to_read * 32);
+    std::vector<cl_uint> all_thread_ids(results_to_read);
+
+    clEnqueueReadBuffer(gpu.queue, gpu.found_hashes_buf, CL_TRUE, 0,
+                        results_to_read * 32, all_hashes.data(), 0, nullptr, nullptr);
+    clEnqueueReadBuffer(gpu.queue, gpu.found_nonces_buf, CL_TRUE, 0,
+                        results_to_read * 32, all_nonces.data(), 0, nullptr, nullptr);
+    clEnqueueReadBuffer(gpu.queue, gpu.found_thread_ids_buf, CL_TRUE, 0,
+                        results_to_read * sizeof(cl_uint), all_thread_ids.data(), 0, nullptr, nullptr);
+
+    // Find our target thread in the results
+    bool found = false;
+    for (size_t i = 0; i < results_to_read; i++) {
+        if (all_thread_ids[i] == known_thread_idx) {
+            found = true;
+            std::string hash_hex = bytes_to_hex(all_hashes.data() + i * 32, 32);
+            std::string nonce_str(reinterpret_cast<char*>(all_nonces.data() + i * 32), config::nonce_len);
+
+            INFO("Thread " << known_thread_idx << " produced:");
+            INFO("  Hash:  " << hash_hex);
+            INFO("  Nonce: " << nonce_str);
+
+            REQUIRE(hash_hex == expected_hash);
+            REQUIRE(nonce_str == expected_nonce);
+            break;
+        }
+    }
+
+    REQUIRE(found);  // Our thread must be in the results
+}

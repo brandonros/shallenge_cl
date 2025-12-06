@@ -57,11 +57,14 @@ inline void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
             // Read all results
             std::vector<uint8_t> all_hashes(results_to_read * 32);
             std::vector<uint8_t> all_nonces(results_to_read * 32);
+            std::vector<cl_uint> all_thread_ids(results_to_read);
 
             clEnqueueReadBuffer(ctx.queue, ctx.found_hashes_buf, CL_TRUE, 0,
                                results_to_read * 32, all_hashes.data(), 0, nullptr, nullptr);
             clEnqueueReadBuffer(ctx.queue, ctx.found_nonces_buf, CL_TRUE, 0,
                                results_to_read * 32, all_nonces.data(), 0, nullptr, nullptr);
+            clEnqueueReadBuffer(ctx.queue, ctx.found_thread_ids_buf, CL_TRUE, 0,
+                               results_to_read * sizeof(cl_uint), all_thread_ids.data(), 0, nullptr, nullptr);
 
             // Find the best result among all found
             size_t best_idx = 0;
@@ -95,7 +98,8 @@ inline void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
                     std::cout << "  Zeroes: " << count_leading_zeros(bytes_to_hex(all_hashes.data() + best_idx * 32, 32)) << std::endl;
                     std::cout << "  Nonce: " << shared.best_nonce << std::endl;
                     std::cout << "  Challenge: " << shared.username << "/" << shared.best_nonce << std::endl;
-                    std::cout << "  Seed: 0x" << std::hex << rng_seed << std::dec << std::endl;
+                    std::cout << "  Seed: 0x" << std::hex << rng_seed << std::dec
+                              << ", ThreadIdx: " << all_thread_ids[best_idx] << std::endl;
                     std::cout << "  Time: " << elapsed << "s elapsed" << std::endl;
                     std::cout << "  (Found " << found_count << " candidates this batch)" << std::endl;
                     std::cout << std::endl;

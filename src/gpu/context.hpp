@@ -34,6 +34,7 @@ struct GPUContext {
     CLBuffer found_count_buf;
     CLBuffer found_hashes_buf;
     CLBuffer found_nonces_buf;
+    CLBuffer found_thread_ids_buf;
 
     std::mt19937_64 rng;
     std::atomic<uint64_t> hashes_computed{0};
@@ -60,6 +61,7 @@ struct GPUContext {
         , found_count_buf(std::move(other.found_count_buf))
         , found_hashes_buf(std::move(other.found_hashes_buf))
         , found_nonces_buf(std::move(other.found_nonces_buf))
+        , found_thread_ids_buf(std::move(other.found_thread_ids_buf))
         , rng(std::move(other.rng))
         , hashes_computed(other.hashes_computed.load())
         , matches_found(other.matches_found.load())
@@ -81,6 +83,7 @@ struct GPUContext {
             found_count_buf = std::move(other.found_count_buf);
             found_hashes_buf = std::move(other.found_hashes_buf);
             found_nonces_buf = std::move(other.found_nonces_buf);
+            found_thread_ids_buf = std::move(other.found_thread_ids_buf);
             rng = std::move(other.rng);
             hashes_computed.store(other.hashes_computed.load());
             matches_found.store(other.matches_found.load());
@@ -190,12 +193,20 @@ struct GPUContext {
         return std::nullopt;
     }
 
+    ctx.found_thread_ids_buf = CLBuffer(clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY,
+                                                        config::max_results * sizeof(cl_uint), nullptr, &err));
+    if (err != CL_SUCCESS) {
+        std::cerr << "[GPU " << device_index << "] Failed to create found thread IDs buffer: " << cl_error_string(err) << std::endl;
+        return std::nullopt;
+    }
+
     // Set kernel arguments (constant ones)
     cl_mem username_mem = ctx.username_buf;
     cl_mem target_mem = ctx.target_hash_buf;
     cl_mem count_mem = ctx.found_count_buf;
     cl_mem hashes_mem = ctx.found_hashes_buf;
     cl_mem nonces_mem = ctx.found_nonces_buf;
+    cl_mem thread_ids_mem = ctx.found_thread_ids_buf;
 
     cl_uint username_len = static_cast<cl_uint>(username.length());
     clSetKernelArg(ctx.kernel, 0, sizeof(cl_mem), &username_mem);
@@ -205,7 +216,8 @@ struct GPUContext {
     clSetKernelArg(ctx.kernel, 4, sizeof(cl_mem), &count_mem);
     clSetKernelArg(ctx.kernel, 5, sizeof(cl_mem), &hashes_mem);
     clSetKernelArg(ctx.kernel, 6, sizeof(cl_mem), &nonces_mem);
-    clSetKernelArg(ctx.kernel, 7, sizeof(cl_uint) * 8, nullptr);  // local memory for target
+    clSetKernelArg(ctx.kernel, 7, sizeof(cl_mem), &thread_ids_mem);
+    clSetKernelArg(ctx.kernel, 8, sizeof(cl_uint) * 8, nullptr);  // local memory for target
 
     // Seed RNG
     std::random_device rd;

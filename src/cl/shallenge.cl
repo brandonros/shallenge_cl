@@ -15,6 +15,7 @@ __kernel void shallenge_mine(
     __global uint* restrict found_count,           // atomic counter - also used as slot allocator
     __global uchar* restrict found_hashes,         // [MAX_RESULTS * 32] bytes
     __global uchar* restrict found_nonces,         // [MAX_RESULTS * 32] bytes (padded for simplicity)
+    __global uint* restrict found_thread_ids,      // [MAX_RESULTS] thread IDs for reproducibility
     __local uint* restrict target_local            // local memory for target hash (8 uints)
 ) {
     uint thread_idx = (uint)get_global_id(0);
@@ -67,6 +68,8 @@ __kernel void shallenge_mine(
                 for (uint i = 0; i < nonce_len; i++) {
                     nonce_out[i] = input[username_len + 1 + i];
                 }
+
+                found_thread_ids[slot] = thread_idx;
             }
             // If slot >= MAX_RESULTS, we drop this result (extremely unlikely)
         }
