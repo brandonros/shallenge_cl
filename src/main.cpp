@@ -245,8 +245,7 @@ void cleanup_gpu(GPUContext& ctx) {
 // Uses a fixed seed to get deterministic nonce, then checks hash matches expected
 bool validate_gpu(GPUContext& ctx, const std::string& username) {
     // Expected hash for DEFAULT_USERNAME with seed 0x12345678, thread 0, first iteration
-    // Run once with empty string to bootstrap, then hardcode the result
-    const char* expected_hash = "";  // TODO: Run once, copy output here
+    const char* expected_hash = "97ccae8eaf1245950067c7ed8d25ef7b17068c8930288ab6277ea058eeb73b49";
 
     // Permissive target - everything matches
     std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
@@ -290,23 +289,13 @@ bool validate_gpu(GPUContext& ctx, const std::string& username) {
     std::string hash_hex = bytes_to_hex(hash.data(), 32);
     std::string nonce_str(reinterpret_cast<char*>(nonce.data()), NONCE_LEN);
 
-    if (strlen(expected_hash) == 0) {
-        // Bootstrap mode: print the hash so user can hardcode it
-        std::cout << "[GPU " << ctx.device_index << "] Validation bootstrap - record this hash:" << std::endl;
-        std::cout << "  Input: " << username << "/" << nonce_str << std::endl;
-        std::cout << "  Hash:  " << hash_hex << std::endl;
-        std::cout << "  (Paste this into expected_hash and rebuild)" << std::endl;
-        return true;  // Don't fail on bootstrap
-    }
+    std::cout << "[GPU " << ctx.device_index << "] Validation (seed=0x" << std::hex << validation_seed << std::dec << "): "
+              << username << "/" << nonce_str << " -> " << hash_hex << std::endl;
 
     if (hash_hex != expected_hash) {
-        std::cerr << "[GPU " << ctx.device_index << "] SHA-256 VALIDATION FAILED!" << std::endl;
-        std::cerr << "  Expected: " << expected_hash << std::endl;
-        std::cerr << "  Got:      " << hash_hex << std::endl;
+        std::cerr << "[GPU " << ctx.device_index << "] SHA-256 VALIDATION FAILED! Expected: " << expected_hash << std::endl;
         return false;
     }
-
-    std::cout << "[GPU " << ctx.device_index << "] SHA-256 validation passed" << std::endl;
     return true;
 }
 
