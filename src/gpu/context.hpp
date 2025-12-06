@@ -1,6 +1,7 @@
 #pragma once
 
-#include "opencl_raii.hpp"
+#include "cl_error.hpp"
+#include "cl_wrappers.hpp"
 #include "../config.hpp"
 
 #include <atomic>
@@ -107,7 +108,7 @@ struct GPUContext {
     // Create context
     cl_context raw_context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create context: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create context: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
     ctx.context = CLContext(raw_context);
@@ -119,7 +120,7 @@ struct GPUContext {
     cl_command_queue raw_queue = clCreateCommandQueue(ctx.context, device, 0, &err);
 #endif
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create command queue: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create command queue: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
     ctx.queue = CLCommandQueue(raw_queue);
@@ -130,7 +131,7 @@ struct GPUContext {
 
     cl_program raw_program = clCreateProgramWithSource(ctx.context, 1, &src, &srcLen, &err);
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create program: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create program: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
     ctx.program = CLProgram(raw_program);
@@ -148,7 +149,7 @@ struct GPUContext {
     // Create kernel
     cl_kernel raw_kernel = clCreateKernel(ctx.program, "shallenge_mine", &err);
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create kernel: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create kernel: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
     ctx.kernel = CLKernel(raw_kernel);
@@ -157,35 +158,35 @@ struct GPUContext {
     ctx.username_buf = CLBuffer(clCreateBuffer(ctx.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                                                 username.length(), (void*)username.c_str(), &err));
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create username buffer: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create username buffer: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
 
     ctx.target_hash_buf = CLBuffer(clCreateBuffer(ctx.context, CL_MEM_READ_ONLY,
                                                    8 * sizeof(cl_uint), nullptr, &err));
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create target hash buffer: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create target hash buffer: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
 
     ctx.found_count_buf = CLBuffer(clCreateBuffer(ctx.context, CL_MEM_READ_WRITE,
                                                    sizeof(cl_uint), nullptr, &err));
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create found count buffer: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create found count buffer: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
 
     ctx.found_hashes_buf = CLBuffer(clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY,
                                                     config::max_results * 32, nullptr, &err));
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create found hashes buffer: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create found hashes buffer: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
 
     ctx.found_nonces_buf = CLBuffer(clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY,
                                                     config::max_results * 32, nullptr, &err));
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << device_index << "] Failed to create found nonces buffer: " << err << std::endl;
+        std::cerr << "[GPU " << device_index << "] Failed to create found nonces buffer: " << cl_error_string(err) << std::endl;
         return std::nullopt;
     }
 

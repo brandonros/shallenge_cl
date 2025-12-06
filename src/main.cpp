@@ -15,14 +15,11 @@
 
 namespace {
 
-// Global pointer for signal handler
-shallenge::SharedState* g_shared_state = nullptr;
+// Signal-safe shutdown flag (only sig_atomic_t is guaranteed safe in signal handlers)
+volatile std::sig_atomic_t g_shutdown_requested = 0;
 
 void signal_handler(int) {
-    if (g_shared_state) {
-        std::cout << "\nShutting down..." << std::endl;
-        g_shared_state->running.store(false);
-    }
+    g_shutdown_requested = 1;
 }
 
 } // anonymous namespace
@@ -44,11 +41,10 @@ int main() {
     shared.username = username;
     shared.best_hash = std::vector<uint32_t>(config::initial_target, config::initial_target + 8);
     shared.start_time = std::chrono::steady_clock::now();
-    g_shared_state = &shared;
 
     // Set up signal handlers
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
 
     std::cout << "Shallenge Miner (OpenCL Multi-GPU)" << std::endl;
     std::cout << "Username: " << username << std::endl;
@@ -100,9 +96,19 @@ int main() {
     auto last_time = std::chrono::steady_clock::now();
 
     while (shared.running.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
 
-        if (!shared.running.load()) break;
+        // Check for signal-triggered shutdown
+        if (g_shutdown_requested) {
+            std::cout << "\nShutting down..." << std::endl;
+            shared.running.store(false);
+            break;
+        }
+
+        // Only print stats every 5 seconds worth of iterations
+        static int tick = 0;
+        if (++tick < 5) continue;
+        tick = 0;
 
         uint64_t total_hashes = 0;
         uint64_t total_matches = 0;

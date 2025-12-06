@@ -2,6 +2,7 @@
 
 #include "../config.hpp"
 #include "../core/hash_utils.hpp"
+#include "../gpu/cl_error.hpp"
 #include "../gpu/context.hpp"
 
 #include <iostream>
@@ -34,7 +35,7 @@ namespace shallenge {
     cl_int err = clEnqueueNDRangeKernel(ctx.queue, ctx.kernel, 1, nullptr,
                                          &global_size, &local_size, 0, nullptr, nullptr);
     if (err != CL_SUCCESS) {
-        std::cerr << "[GPU " << ctx.device_index << "] Validation kernel failed: " << err << std::endl;
+        std::cerr << "[GPU " << ctx.device_index << "] Validation kernel failed: " << cl_error_string(err) << std::endl;
         return false;
     }
     clFinish(ctx.queue);

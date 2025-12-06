@@ -34,7 +34,7 @@ CL_SOURCES=src/cl/sha256.cl src/cl/util.cl src/cl/nonce.cl src/cl/shallenge.cl
 HEADERS=src/config.hpp \
         src/core/types.hpp \
         src/core/hash_utils.hpp \
-        src/gpu/opencl_raii.hpp \
+        src/gpu/cl_wrappers.hpp \
         src/gpu/device.hpp \
         src/gpu/context.hpp \
         src/mining/validator.hpp \

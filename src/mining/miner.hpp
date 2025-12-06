@@ -3,6 +3,7 @@
 #include "../config.hpp"
 #include "../core/hash_utils.hpp"
 #include "../core/types.hpp"
+#include "../gpu/cl_error.hpp"
 #include "../gpu/context.hpp"
 
 #include <algorithm>
@@ -38,7 +39,7 @@ inline void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
         size_t local_size = config::local_size;
         cl_int err = clEnqueueNDRangeKernel(ctx.queue, ctx.kernel, 1, nullptr, &global_size, &local_size, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
-            std::cerr << "[GPU " << ctx.device_index << "] Kernel error: " << err << std::endl;
+            std::cerr << "[GPU " << ctx.device_index << "] Kernel error: " << cl_error_string(err) << std::endl;
             break;
         }
 
