@@ -95,6 +95,7 @@ inline void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
                     std::cout << "  Zeroes: " << count_leading_zeros(bytes_to_hex(all_hashes.data() + best_idx * 32, 32)) << std::endl;
                     std::cout << "  Nonce: " << shared.best_nonce << std::endl;
                     std::cout << "  Challenge: " << shared.username << "/" << shared.best_nonce << std::endl;
+                    std::cout << "  Seed: 0x" << std::hex << rng_seed << std::dec << std::endl;
                     std::cout << "  Time: " << elapsed << "s elapsed" << std::endl;
                     std::cout << "  (Found " << found_count << " candidates this batch)" << std::endl;
                     std::cout << std::endl;

@@ -22,7 +22,7 @@ constexpr size_t max_results = 64;
 
 // Initial target hash (8 leading zero nibbles)
 constexpr uint32_t initial_target[8] = {
-    0x00000000, 0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+    0x00000000, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
     0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
 };
 
