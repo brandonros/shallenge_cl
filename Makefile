@@ -4,8 +4,8 @@ SOURCES=src/main.cpp
 OUTDIR=output
 OBJECTS=$(OUTDIR)/main.o
 EXECUTABLE=$(OUTDIR)/shallenge_cl
-LDFLAGS=-framework OpenCL
-CFLAGS=-c -std=c++11 -Wall -O2
+LDFLAGS=-framework OpenCL -pthread
+CFLAGS=-c -std=c++11 -Wall -O2 -pthread
 
 # OpenCL kernel source files (order matters - dependencies first)
 CL_SOURCES=src/cl/sha256.cl src/cl/nonce.cl src/cl/shallenge.cl
