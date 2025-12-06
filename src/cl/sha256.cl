@@ -149,20 +149,3 @@ inline void hash_uint_to_bytes(const uint* restrict hash, uchar* restrict output
         output[i*4 + 3] = hash[i];
     }
 }
-
-// Legacy function for compatibility - converts to bytes
-inline void sha256_32(const uchar* restrict input, uchar* restrict output) {
-    uint hash[8];
-    sha256_32_uint(input, hash);
-    hash_uint_to_bytes(hash, output);
-}
-
-// Legacy compare for compatibility
-inline int compare_hashes(const uchar* restrict a, const uchar* restrict b) {
-    #pragma unroll
-    for (int i = 0; i < 32; i++) {
-        if (a[i] < b[i]) return -1;
-        if (a[i] > b[i]) return 1;
-    }
-    return 0;
-}

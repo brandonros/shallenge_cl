@@ -16,7 +16,10 @@
 
 // Configuration
 const char* DEFAULT_USERNAME = "brandonros";
-const size_t NONCE_LEN = 21;
+const size_t USERNAME_LEN = 10; // Formula: username + "/" + nonce = 32 bytes / nonce = 32 - 1 - username_len
+const size_t SHA256_BLOCK_SIZE = 32;  // Single SHA-256 block (after padding) for optimal performance
+const size_t SEPARATOR_LEN = 1;       // "/" separator between username and nonce
+const size_t NONCE_LEN = SHA256_BLOCK_SIZE - (USERNAME_LEN + SEPARATOR_LEN); // Nonce length is derived: must fill remaining space in the 32-byte block;
 const size_t GLOBAL_SIZE = 1024 * 1024;  // 1M threads per kernel launch
 const size_t LOCAL_SIZE = 256;           // Work-group size (tune: 64, 128, 256, 512)
 
@@ -151,8 +154,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Load and build kernel (embedded at compile time via xxd)
-    const char* src = reinterpret_cast<const char*>(src_kernel_combined_cl);
-    size_t srcLen = src_kernel_combined_cl_len;
+    const char* src = reinterpret_cast<const char*>(output_kernel_combined_cl);
+    size_t srcLen = output_kernel_combined_cl_len;
 
     cl_program program = clCreateProgramWithSource(context, 1, &src, &srcLen, &err);
     if (err != CL_SUCCESS) {
