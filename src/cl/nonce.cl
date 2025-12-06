@@ -21,10 +21,9 @@ inline uint splitmix32(uint x) {
     return x ^ (x >> 16);
 }
 
-// Initialize RNG state once per thread (32-bit state)
-inline void init_rng_state(size_t thread_idx, ulong rng_seed, uint* s0, uint* s1) {
-    // Mix thread_idx and seed into 32-bit values
-    uint seed = splitmix32((uint)rng_seed ^ (uint)thread_idx);
+// Initialize RNG state once per thread (fully 32-bit)
+inline void init_rng_state(uint thread_idx, uint rng_seed, uint* s0, uint* s1) {
+    uint seed = splitmix32(rng_seed ^ thread_idx);
     *s0 = seed;
     seed = splitmix32(seed);
     *s1 = seed;

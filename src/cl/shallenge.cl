@@ -5,17 +5,17 @@
 #define HASHES_PER_THREAD 64
 
 __kernel void shallenge_mine(
-    __global const uchar* restrict username,      
-    uint username_len,                             
+    __global const uchar* restrict username,
+    uint username_len,
     __global const uint* restrict target_hash,    // 8 uints (32 bytes as big-endian words)
-    ulong rng_seed,                                // random seed from host
+    uint rng_seed,                                 // 32-bit random seed from host
     __global uint* restrict found_count,           // atomic counter for matches found
     __global uchar* restrict found_hash,           // 32 bytes - best hash found
     __global uchar* restrict found_nonce,          // 21 bytes - winning nonce
     __global uint* restrict found_thread_idx,      // which thread found it
     __local uint* restrict target_local            // local memory for target hash (8 uints)
 ) {
-    size_t thread_idx = get_global_id(0);
+    uint thread_idx = (uint)get_global_id(0);      // 32-bit thread index
     int lid = get_local_id(0);
 
     // Load target hash into local memory (first 8 threads of each work-group)
@@ -24,14 +24,7 @@ __kernel void shallenge_mine(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // Copy target from local to private memory for comparison (once per thread)
-    uint target[8];
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        target[i] = target_local[i];
-    }
-
-    // Initialize RNG state ONCE per thread (32-bit for GPU efficiency)
+    // Initialize RNG state ONCE per thread (fully 32-bit)
     uint s0, s1;
     init_rng_state(thread_idx, rng_seed, &s0, &s1);
 
@@ -52,8 +45,8 @@ __kernel void shallenge_mine(
         uint hash[8];
         sha256_32_uint(input, hash);
 
-        // Check if this hash is better
-        if (is_hash_better(hash, target)) {
+        // Check if this hash is better (compare directly against local memory)
+        if (is_hash_better(hash, target_local)) {
             atomic_inc(found_count);
 
             // Write hash bytes directly to global memory (no temp array)
@@ -72,7 +65,7 @@ __kernel void shallenge_mine(
             }
 
             // Record which thread found it
-            *found_thread_idx = (uint)thread_idx;
+            *found_thread_idx = thread_idx;
         }
     }
 }

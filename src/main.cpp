@@ -246,14 +246,14 @@ void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
             current_target = shared.best_hash;
         }
 
-        cl_ulong rng_seed = ctx.rng();
+        cl_uint rng_seed = static_cast<cl_uint>(ctx.rng());
 
         // Reset found count and update target
         cl_uint zero = 0;
         clEnqueueWriteBuffer(ctx.queue, ctx.found_count_buf, CL_FALSE, 0, sizeof(cl_uint), &zero, 0, nullptr, nullptr);
         clEnqueueWriteBuffer(ctx.queue, ctx.target_hash_buf, CL_FALSE, 0, 8 * sizeof(cl_uint), current_target.data(), 0, nullptr, nullptr);
 
-        clSetKernelArg(ctx.kernel, 3, sizeof(cl_ulong), &rng_seed);
+        clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &rng_seed);
 
         size_t global_size = GLOBAL_SIZE;
         size_t local_size = LOCAL_SIZE;
