@@ -23,7 +23,7 @@ inline ulong splitmix64(ulong x) {
 
 // Generate a base64 nonce of fixed length (21 chars)
 // Inlined xoroshiro128** for maximum performance
-void generate_base64_nonce(size_t thread_idx, ulong rng_seed, uchar* restrict nonce, size_t nonce_len) {
+inline void generate_base64_nonce(size_t thread_idx, ulong rng_seed, uchar* restrict nonce, size_t nonce_len) {
     // Mix seed with thread index using splitmix64
     ulong mixed = rng_seed + (ulong)thread_idx;
     mixed += 0x9e3779b97f4a7c15UL;

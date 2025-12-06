@@ -18,6 +18,7 @@
 const char* DEFAULT_USERNAME = "brandonros";
 const size_t NONCE_LEN = 21;
 const size_t GLOBAL_SIZE = 1024 * 1024;  // 1M threads per kernel launch
+const size_t LOCAL_SIZE = 256;           // Work-group size (tune: 64, 128, 256, 512)
 
 // Convert bytes to hex string
 std::string bytes_to_hex(const uint8_t* data, size_t len) {
@@ -25,6 +26,16 @@ std::string bytes_to_hex(const uint8_t* data, size_t len) {
     ss << std::hex << std::setfill('0');
     for (size_t i = 0; i < len; i++) {
         ss << std::setw(2) << static_cast<int>(data[i]);
+    }
+    return ss.str();
+}
+
+// Convert uint32_t array to hex string (big-endian)
+std::string uint_to_hex(const uint32_t* data, size_t count) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < count; i++) {
+        ss << std::setw(8) << data[i];
     }
     return ss.str();
 }
@@ -40,10 +51,31 @@ bool hex_to_bytes(const std::string& hex, uint8_t* out, size_t out_len) {
     return true;
 }
 
-// Compare two 32-byte hashes lexicographically
+// Parse hex string to uint32_t array (big-endian, for OpenCL kernel)
+bool hex_to_uint(const std::string& hex, uint32_t* out, size_t out_count) {
+    if (hex.length() != out_count * 8) return false;
+    for (size_t i = 0; i < out_count; i++) {
+        unsigned int word;
+        if (sscanf(hex.c_str() + i * 8, "%8x", &word) != 1) return false;
+        out[i] = static_cast<uint32_t>(word);
+    }
+    return true;
+}
+
+// Convert bytes to uint32_t array (big-endian)
+void bytes_to_uint(const uint8_t* bytes, uint32_t* out, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        out[i] = (static_cast<uint32_t>(bytes[i*4]) << 24) |
+                 (static_cast<uint32_t>(bytes[i*4+1]) << 16) |
+                 (static_cast<uint32_t>(bytes[i*4+2]) << 8) |
+                 static_cast<uint32_t>(bytes[i*4+3]);
+    }
+}
+
+// Compare two 8-word hashes lexicographically
 // Returns: -1 if a < b, 0 if a == b, 1 if a > b
-int compare_hashes(const uint8_t* a, const uint8_t* b) {
-    for (int i = 0; i < 32; i++) {
+int compare_hashes_uint(const uint32_t* a, const uint32_t* b) {
+    for (int i = 0; i < 8; i++) {
         if (a[i] < b[i]) return -1;
         if (a[i] > b[i]) return 1;
     }
@@ -53,13 +85,13 @@ int compare_hashes(const uint8_t* a, const uint8_t* b) {
 int main(int argc, char* argv[]) {
     // Parse arguments
     std::string username = DEFAULT_USERNAME;
-    std::vector<uint8_t> target_hash(32, 0xFF);  // Start with max hash (all 0xFF)
+    std::vector<uint32_t> target_hash(8, 0xFFFFFFFF);  // Start with max hash (all 0xFF)
 
     if (argc >= 2) {
         username = argv[1];
     }
     if (argc >= 3) {
-        if (!hex_to_bytes(argv[2], target_hash.data(), 32)) {
+        if (!hex_to_uint(argv[2], target_hash.data(), 8)) {
             std::cerr << "Invalid target hash format. Expected 64 hex characters." << std::endl;
             return 1;
         }
@@ -73,8 +105,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Shallenge Miner (OpenCL)" << std::endl;
     std::cout << "Username: " << username << std::endl;
-    std::cout << "Initial target: " << bytes_to_hex(target_hash.data(), 32) << std::endl;
+    std::cout << "Initial target: " << uint_to_hex(target_hash.data(), 8) << std::endl;
     std::cout << "Global size: " << GLOBAL_SIZE << " threads per launch" << std::endl;
+    std::cout << "Local size: " << LOCAL_SIZE << " threads per work-group" << std::endl;
 
     cl_int err;
 
@@ -146,7 +179,7 @@ int main(int argc, char* argv[]) {
     cl_mem username_buf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                                           username.length(), (void*)username.c_str(), &err);
     cl_mem target_hash_buf = clCreateBuffer(context, CL_MEM_READ_ONLY,
-                                             32, nullptr, &err);
+                                             8 * sizeof(cl_uint), nullptr, &err);
     cl_mem found_count_buf = clCreateBuffer(context, CL_MEM_READ_WRITE,
                                              sizeof(cl_uint), nullptr, &err);
     cl_mem found_hash_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY,
@@ -166,6 +199,8 @@ int main(int argc, char* argv[]) {
     clSetKernelArg(kernel, 5, sizeof(cl_mem), &found_hash_buf);
     clSetKernelArg(kernel, 6, sizeof(cl_mem), &found_nonce_buf);
     clSetKernelArg(kernel, 7, sizeof(cl_mem), &found_thread_buf);
+    // arg 8: local memory for target hash (8 uints)
+    clSetKernelArg(kernel, 8, sizeof(cl_uint) * 8, nullptr);
 
     // Random number generator for seeds
     std::random_device rd;
@@ -176,8 +211,8 @@ int main(int argc, char* argv[]) {
     uint64_t total_hashes = 0;
     uint64_t total_matches = 0;
 
-    // Best hash found
-    std::vector<uint8_t> best_hash = target_hash;
+    // Best hash found (as uint32_t[8])
+    std::vector<uint32_t> best_hash = target_hash;
     std::string best_nonce;
 
     std::cout << "\nMining started...\n" << std::endl;
@@ -191,15 +226,16 @@ int main(int argc, char* argv[]) {
         cl_uint zero = 0;
         clEnqueueWriteBuffer(queue, found_count_buf, CL_FALSE, 0, sizeof(cl_uint), &zero, 0, nullptr, nullptr);
 
-        // Update target hash buffer
-        clEnqueueWriteBuffer(queue, target_hash_buf, CL_FALSE, 0, 32, best_hash.data(), 0, nullptr, nullptr);
+        // Update target hash buffer (now as uint[8])
+        clEnqueueWriteBuffer(queue, target_hash_buf, CL_FALSE, 0, 8 * sizeof(cl_uint), best_hash.data(), 0, nullptr, nullptr);
 
         // Set rng_seed argument
         clSetKernelArg(kernel, 3, sizeof(cl_ulong), &rng_seed);
 
-        // Execute kernel
+        // Execute kernel with explicit local size
         size_t global_size = GLOBAL_SIZE;
-        err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global_size, nullptr, 0, nullptr, nullptr);
+        size_t local_size = LOCAL_SIZE;
+        err = clEnqueueNDRangeKernel(queue, kernel, 1, nullptr, &global_size, &local_size, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
             std::cerr << "Failed to enqueue kernel (error " << err << ")" << std::endl;
             break;
@@ -224,9 +260,13 @@ int main(int argc, char* argv[]) {
             clEnqueueReadBuffer(queue, found_nonce_buf, CL_TRUE, 0, NONCE_LEN, found_nonce.data(), 0, nullptr, nullptr);
             clEnqueueReadBuffer(queue, found_thread_buf, CL_TRUE, 0, sizeof(cl_uint), &found_thread_idx, 0, nullptr, nullptr);
 
+            // Convert found hash to uint32_t[8] for comparison
+            std::vector<uint32_t> found_hash_uint(8);
+            bytes_to_uint(found_hash.data(), found_hash_uint.data(), 8);
+
             // Check if this is actually better than current best
-            if (compare_hashes(found_hash.data(), best_hash.data()) < 0) {
-                best_hash = found_hash;
+            if (compare_hashes_uint(found_hash_uint.data(), best_hash.data()) < 0) {
+                best_hash = found_hash_uint;
                 best_nonce = std::string(found_nonce.data(), NONCE_LEN);
                 total_matches++;
 
@@ -236,7 +276,7 @@ int main(int argc, char* argv[]) {
                 double hashes_per_sec = elapsed > 0 ? static_cast<double>(total_hashes) / elapsed : 0;
 
                 std::cout << "NEW BEST FOUND!" << std::endl;
-                std::cout << "  Hash: " << bytes_to_hex(best_hash.data(), 32) << std::endl;
+                std::cout << "  Hash: " << bytes_to_hex(found_hash.data(), 32) << std::endl;
                 std::cout << "  Nonce: " << best_nonce << std::endl;
                 std::cout << "  Challenge: " << username << "/" << best_nonce << std::endl;
                 std::cout << "  Thread: " << found_thread_idx << ", Seed: " << rng_seed << std::endl;

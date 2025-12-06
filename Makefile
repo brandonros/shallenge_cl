@@ -7,7 +7,7 @@ LDFLAGS=-framework OpenCL
 CFLAGS=-c -std=c++11 -Wall -O2
 
 # OpenCL kernel source files (order matters - dependencies first)
-CL_SOURCES=src/cl/sha256.cl src/cl/xoroshiro.cl src/cl/shallenge.cl
+CL_SOURCES=src/cl/sha256.cl src/cl/nonce.cl src/cl/shallenge.cl
 
 all: src/kernel.h $(EXECUTABLE)
 

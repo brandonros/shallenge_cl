@@ -4,7 +4,9 @@
 // - OpenCL built-ins (rotate, bitselect)
 // - Macros for zero function-call overhead
 // - 16-word ring buffer to reduce register pressure
-// - Loop unrolling hints
+// - Split loops to eliminate branches
+// - Word-based comparison (8 uint vs 32 uchar)
+// - Early exit comparison
 
 // SHA-256 round constants
 __constant uint K[64] = {
@@ -31,9 +33,24 @@ __constant uint K[64] = {
 #define SSIG0(x)       (rotate((x), 25u) ^ rotate((x), 14u) ^ ((x) >> 3))
 #define SSIG1(x)       (rotate((x), 15u) ^ rotate((x), 13u) ^ ((x) >> 10))
 
-// SHA-256 for exactly 32-byte input
-// Uses 16-word ring buffer to reduce register pressure
-void sha256_32(const uchar* restrict input, uchar* restrict output) {
+// SHA-256 round macro to avoid code duplication
+#define SHA256_ROUND(a, b, c, d, e, f, g, h, ki, wi) \
+    do { \
+        uint t1 = (h) + BSIG1(e) + CH(e, f, g) + (ki) + (wi); \
+        uint t2 = BSIG0(a) + MAJ(a, b, c); \
+        (h) = (g); \
+        (g) = (f); \
+        (f) = (e); \
+        (e) = (d) + t1; \
+        (d) = (c); \
+        (c) = (b); \
+        (b) = (a); \
+        (a) = t1 + t2; \
+    } while(0)
+
+// SHA-256 for exactly 32-byte input, returns hash as uint[8] (big-endian words)
+// This avoids the costly byte-by-byte output conversion
+inline void sha256_32_uint(const uchar* restrict input, uint* restrict output) {
     uint w[16];
 
     // Load first 8 words from input (big-endian)
@@ -65,58 +82,83 @@ void sha256_32(const uchar* restrict input, uchar* restrict output) {
     uint g = 0x1f83d9abu;
     uint h = 0x5be0cd19u;
 
-    // Main compression loop - 64 rounds with ring buffer
+    // Rounds 0-15: Use message words directly (no message schedule computation)
     #pragma unroll
-    for (int i = 0; i < 64; i++) {
-        uint wi;
-        int j = i & 0xF;
-
-        if (i < 16) {
-            wi = w[j];
-        } else {
-            wi = w[j] = SSIG1(w[(j + 14) & 0xF]) +
-                        w[(j + 9) & 0xF] +
-                        SSIG0(w[(j + 1) & 0xF]) +
-                        w[j];
-        }
-
-        uint t1 = h + BSIG1(e) + CH(e, f, g) + K[i] + wi;
-        uint t2 = BSIG0(a) + MAJ(a, b, c);
-
-        h = g;
-        g = f;
-        f = e;
-        e = d + t1;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2;
+    for (int i = 0; i < 16; i++) {
+        SHA256_ROUND(a, b, c, d, e, f, g, h, K[i], w[i]);
     }
 
-    // Add initial hash values and store directly (fused)
-    uint h0 = 0x6a09e667u + a;
-    uint h1 = 0xbb67ae85u + b;
-    uint h2 = 0x3c6ef372u + c;
-    uint h3 = 0xa54ff53au + d;
-    uint h4 = 0x510e527fu + e;
-    uint h5 = 0x9b05688cu + f;
-    uint h6 = 0x1f83d9abu + g;
-    uint h7 = 0x5be0cd19u + h;
+    // Rounds 16-63: Compute message schedule on the fly with ring buffer
+    #pragma unroll
+    for (int i = 16; i < 64; i++) {
+        int j = i & 0xF;
+        w[j] = SSIG1(w[(j + 14) & 0xF]) +
+               w[(j + 9) & 0xF] +
+               SSIG0(w[(j + 1) & 0xF]) +
+               w[j];
+        SHA256_ROUND(a, b, c, d, e, f, g, h, K[i], w[j]);
+    }
 
-    // Store output (big-endian)
-    output[0]  = (h0 >> 24); output[1]  = (h0 >> 16); output[2]  = (h0 >> 8); output[3]  = h0;
-    output[4]  = (h1 >> 24); output[5]  = (h1 >> 16); output[6]  = (h1 >> 8); output[7]  = h1;
-    output[8]  = (h2 >> 24); output[9]  = (h2 >> 16); output[10] = (h2 >> 8); output[11] = h2;
-    output[12] = (h3 >> 24); output[13] = (h3 >> 16); output[14] = (h3 >> 8); output[15] = h3;
-    output[16] = (h4 >> 24); output[17] = (h4 >> 16); output[18] = (h4 >> 8); output[19] = h4;
-    output[20] = (h5 >> 24); output[21] = (h5 >> 16); output[22] = (h5 >> 8); output[23] = h5;
-    output[24] = (h6 >> 24); output[25] = (h6 >> 16); output[26] = (h6 >> 8); output[27] = h6;
-    output[28] = (h7 >> 24); output[29] = (h7 >> 16); output[30] = (h7 >> 8); output[31] = h7;
+    // Add initial hash values and store as uint[8]
+    output[0] = 0x6a09e667u + a;
+    output[1] = 0xbb67ae85u + b;
+    output[2] = 0x3c6ef372u + c;
+    output[3] = 0xa54ff53au + d;
+    output[4] = 0x510e527fu + e;
+    output[5] = 0x9b05688cu + f;
+    output[6] = 0x1f83d9abu + g;
+    output[7] = 0x5be0cd19u + h;
 }
 
-// Compare two 32-byte hashes lexicographically
+// Compare two hashes stored as uint[8] (big-endian words)
 // Returns: -1 if a < b, 0 if a == b, 1 if a > b
-int compare_hashes(const uchar* restrict a, const uchar* restrict b) {
+// Only 8 comparisons instead of 32
+inline int compare_hashes_uint(const uint* restrict a, const uint* restrict b) {
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
+    }
+    return 0;
+}
+
+// Fast check: is hash potentially better than target?
+// Returns 1 if hash < target (better), 0 if hash >= target (worse or equal)
+// Uses early exit - most hashes fail on first word
+inline int is_hash_better(const uint* restrict hash, const uint* restrict target) {
+    // Check first word - this eliminates ~99.9999% of hashes
+    if (hash[0] > target[0]) return 0;
+    if (hash[0] < target[0]) return 1;
+
+    // First word tied, check remaining words
+    #pragma unroll
+    for (int i = 1; i < 8; i++) {
+        if (hash[i] > target[i]) return 0;
+        if (hash[i] < target[i]) return 1;
+    }
+    return 0;  // Equal means not better
+}
+
+// Convert uint[8] hash to uchar[32] for output (only called for winners)
+inline void hash_uint_to_bytes(const uint* restrict hash, uchar* restrict output) {
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        output[i*4]     = (hash[i] >> 24);
+        output[i*4 + 1] = (hash[i] >> 16);
+        output[i*4 + 2] = (hash[i] >> 8);
+        output[i*4 + 3] = hash[i];
+    }
+}
+
+// Legacy function for compatibility - converts to bytes
+inline void sha256_32(const uchar* restrict input, uchar* restrict output) {
+    uint hash[8];
+    sha256_32_uint(input, hash);
+    hash_uint_to_bytes(hash, output);
+}
+
+// Legacy compare for compatibility
+inline int compare_hashes(const uchar* restrict a, const uchar* restrict b) {
     #pragma unroll
     for (int i = 0; i < 32; i++) {
         if (a[i] < b[i]) return -1;
