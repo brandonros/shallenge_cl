@@ -19,8 +19,7 @@
 #include "kernel.h"
 
 // Configuration
-const char* DEFAULT_USERNAME = "brandonros";
-const size_t USERNAME_LEN = 10;
+const size_t USERNAME_LEN = sizeof(DEFAULT_USERNAME) - 1;  // -1 for null terminator
 const size_t SHA256_BLOCK_SIZE = 32;
 const size_t SEPARATOR_LEN = 1;
 const size_t NONCE_LEN = SHA256_BLOCK_SIZE - (USERNAME_LEN + SEPARATOR_LEN);

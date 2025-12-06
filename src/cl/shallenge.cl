@@ -5,8 +5,8 @@
 #define HASHES_PER_THREAD 64
 
 __kernel void shallenge_mine(
-    __global const uchar* restrict username,      // e.g., "brandonros"
-    uint username_len,                             // e.g., 10
+    __global const uchar* restrict username,      
+    uint username_len,                             
     __global const uint* restrict target_hash,    // 8 uints (32 bytes as big-endian words)
     ulong rng_seed,                                // random seed from host
     __global uint* restrict found_count,           // atomic counter for matches found
