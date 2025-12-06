@@ -1,5 +1,5 @@
 // Shallenge mining kernel
-// Note: This file is concatenated after sha256.cl and nonce.cl
+// Note: This file is concatenated after sha256.cl, util.cl, and nonce.cl
 
 #define NONCE_LEN 21
 #define HASHES_PER_THREAD 64

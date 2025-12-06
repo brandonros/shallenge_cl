@@ -16,7 +16,7 @@ endif
 CFLAGS=-c -std=c++11 -Wall -O2 -pthread
 
 # OpenCL kernel source files (order matters - dependencies first)
-CL_SOURCES=src/cl/sha256.cl src/cl/nonce.cl src/cl/shallenge.cl
+CL_SOURCES=src/cl/sha256.cl src/cl/util.cl src/cl/nonce.cl src/cl/shallenge.cl
 
 all: $(OUTDIR) $(OUTDIR)/kernel.h $(EXECUTABLE)
 
