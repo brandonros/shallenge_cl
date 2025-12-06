@@ -1,6 +1,6 @@
 // xoroshiro64** RNG - 32-bit version for GPU efficiency
 // Batched extraction: 5 base64 chars per 32-bit value (5 * 6 = 30 bits)
-// For 21-char nonce: 5 RNG calls instead of 21
+// RNG calls = ceil(nonce_len / 5) instead of nonce_len
 
 __constant uchar BASE64_CHARS[64] = {
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
