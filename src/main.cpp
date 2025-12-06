@@ -33,6 +33,19 @@ std::string bytes_to_hex(const uint8_t* data, size_t len) {
     return ss.str();
 }
 
+// Count the number of leading '0' nibbles in a hex string
+int count_leading_zeros(const std::string& hex_string) {
+    int count = 0;
+    for (char c : hex_string) {
+        if (c == '0') {
+            count++;
+        } else {
+            break;  // Stop at first non-zero
+        }
+    }
+    return count;
+}
+
 // Convert uint32_t array to hex string (big-endian)
 std::string uint_to_hex(const uint32_t* data, size_t count) {
     std::stringstream ss;
@@ -280,6 +293,7 @@ int main(int argc, char* argv[]) {
 
                 std::cout << "NEW BEST FOUND!" << std::endl;
                 std::cout << "  Hash: " << bytes_to_hex(found_hash.data(), 32) << std::endl;
+                std::cout << "  Zeroes: " << count_leading_zeros(bytes_to_hex(found_hash.data(), 32)) << std::endl;
                 std::cout << "  Nonce: " << best_nonce << std::endl;
                 std::cout << "  Challenge: " << username << "/" << best_nonce << std::endl;
                 std::cout << "  Thread: " << found_thread_idx << ", Seed: " << rng_seed << std::endl;
