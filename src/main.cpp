@@ -30,6 +30,9 @@ const size_t NONCE_LEN = SHA256_BLOCK_SIZE - (USERNAME_LEN + SEPARATOR_LEN);
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 
+// Must match kernel's MAX_RESULTS
+const size_t MAX_RESULTS = 64;
+
 // Per-GPU context
 struct GPUContext {
     int device_index;
@@ -44,9 +47,8 @@ struct GPUContext {
     cl_mem username_buf;
     cl_mem target_hash_buf;
     cl_mem found_count_buf;
-    cl_mem found_hash_buf;
-    cl_mem found_nonce_buf;
-    cl_mem found_thread_buf;
+    cl_mem found_hashes_buf;   // [MAX_RESULTS * 32] bytes
+    cl_mem found_nonces_buf;   // [MAX_RESULTS * 32] bytes
 
     std::mt19937_64 rng;
     std::atomic<uint64_t> hashes_computed{0};
@@ -205,19 +207,20 @@ bool initialize_gpu(GPUContext& ctx, cl_device_id device, int device_index, cons
                                           8 * sizeof(cl_uint), nullptr, &err);
     ctx.found_count_buf = clCreateBuffer(ctx.context, CL_MEM_READ_WRITE,
                                           sizeof(cl_uint), nullptr, &err);
-    ctx.found_hash_buf = clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY, 32, nullptr, &err);
-    ctx.found_nonce_buf = clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY, NONCE_LEN, nullptr, &err);
-    ctx.found_thread_buf = clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY, sizeof(cl_uint), nullptr, &err);
+    ctx.found_hashes_buf = clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY,
+                                           MAX_RESULTS * 32, nullptr, &err);
+    ctx.found_nonces_buf = clCreateBuffer(ctx.context, CL_MEM_WRITE_ONLY,
+                                           MAX_RESULTS * 32, nullptr, &err);
 
     cl_uint username_len = static_cast<cl_uint>(username.length());
     clSetKernelArg(ctx.kernel, 0, sizeof(cl_mem), &ctx.username_buf);
     clSetKernelArg(ctx.kernel, 1, sizeof(cl_uint), &username_len);
     clSetKernelArg(ctx.kernel, 2, sizeof(cl_mem), &ctx.target_hash_buf);
+    // arg 3 (rng_seed) set per launch
     clSetKernelArg(ctx.kernel, 4, sizeof(cl_mem), &ctx.found_count_buf);
-    clSetKernelArg(ctx.kernel, 5, sizeof(cl_mem), &ctx.found_hash_buf);
-    clSetKernelArg(ctx.kernel, 6, sizeof(cl_mem), &ctx.found_nonce_buf);
-    clSetKernelArg(ctx.kernel, 7, sizeof(cl_mem), &ctx.found_thread_buf);
-    clSetKernelArg(ctx.kernel, 8, sizeof(cl_uint) * 8, nullptr);  // local memory for target
+    clSetKernelArg(ctx.kernel, 5, sizeof(cl_mem), &ctx.found_hashes_buf);
+    clSetKernelArg(ctx.kernel, 6, sizeof(cl_mem), &ctx.found_nonces_buf);
+    clSetKernelArg(ctx.kernel, 7, sizeof(cl_uint) * 8, nullptr);  // local memory for target
 
     std::random_device rd;
     ctx.rng.seed(rd() + static_cast<uint64_t>(device_index) * 0x9E3779B97F4A7C15ULL);
@@ -230,9 +233,8 @@ void cleanup_gpu(GPUContext& ctx) {
     if (ctx.username_buf) clReleaseMemObject(ctx.username_buf);
     if (ctx.target_hash_buf) clReleaseMemObject(ctx.target_hash_buf);
     if (ctx.found_count_buf) clReleaseMemObject(ctx.found_count_buf);
-    if (ctx.found_hash_buf) clReleaseMemObject(ctx.found_hash_buf);
-    if (ctx.found_nonce_buf) clReleaseMemObject(ctx.found_nonce_buf);
-    if (ctx.found_thread_buf) clReleaseMemObject(ctx.found_thread_buf);
+    if (ctx.found_hashes_buf) clReleaseMemObject(ctx.found_hashes_buf);
+    if (ctx.found_nonces_buf) clReleaseMemObject(ctx.found_nonces_buf);
     if (ctx.kernel) clReleaseKernel(ctx.kernel);
     if (ctx.program) clReleaseProgram(ctx.program);
     if (ctx.queue) clReleaseCommandQueue(ctx.queue);
@@ -276,34 +278,52 @@ void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
         clEnqueueReadBuffer(ctx.queue, ctx.found_count_buf, CL_TRUE, 0, sizeof(cl_uint), &found_count, 0, nullptr, nullptr);
 
         if (found_count > 0) {
-            std::vector<uint8_t> found_hash(32);
-            std::vector<char> found_nonce(NONCE_LEN + 1, 0);
-            cl_uint found_thread_idx;
+            // Cap at MAX_RESULTS (kernel may have found more but only stored this many)
+            size_t results_to_read = std::min(static_cast<size_t>(found_count), MAX_RESULTS);
 
-            clEnqueueReadBuffer(ctx.queue, ctx.found_hash_buf, CL_TRUE, 0, 32, found_hash.data(), 0, nullptr, nullptr);
-            clEnqueueReadBuffer(ctx.queue, ctx.found_nonce_buf, CL_TRUE, 0, NONCE_LEN, found_nonce.data(), 0, nullptr, nullptr);
-            clEnqueueReadBuffer(ctx.queue, ctx.found_thread_buf, CL_TRUE, 0, sizeof(cl_uint), &found_thread_idx, 0, nullptr, nullptr);
+            // Read all results
+            std::vector<uint8_t> all_hashes(results_to_read * 32);
+            std::vector<uint8_t> all_nonces(results_to_read * 32);
 
-            std::vector<uint32_t> found_hash_uint(8);
-            bytes_to_uint(found_hash.data(), found_hash_uint.data(), 8);
+            clEnqueueReadBuffer(ctx.queue, ctx.found_hashes_buf, CL_TRUE, 0,
+                               results_to_read * 32, all_hashes.data(), 0, nullptr, nullptr);
+            clEnqueueReadBuffer(ctx.queue, ctx.found_nonces_buf, CL_TRUE, 0,
+                               results_to_read * 32, all_nonces.data(), 0, nullptr, nullptr);
 
-            // Try to update best hash
+            // Find the best result among all found
+            size_t best_idx = 0;
+            std::vector<uint32_t> best_hash_uint(8);
+            bytes_to_uint(all_hashes.data(), best_hash_uint.data(), 8);
+
+            for (size_t i = 1; i < results_to_read; i++) {
+                std::vector<uint32_t> this_hash_uint(8);
+                bytes_to_uint(all_hashes.data() + i * 32, this_hash_uint.data(), 8);
+
+                if (compare_hashes_uint(this_hash_uint.data(), best_hash_uint.data()) < 0) {
+                    best_idx = i;
+                    best_hash_uint = this_hash_uint;
+                }
+            }
+
+            // Try to update global best hash
             {
                 std::lock_guard<std::mutex> lock(shared.best_hash_mutex);
-                if (compare_hashes_uint(found_hash_uint.data(), shared.best_hash.data()) < 0) {
-                    shared.best_hash = found_hash_uint;
-                    shared.best_nonce = std::string(found_nonce.data(), NONCE_LEN);
+                if (compare_hashes_uint(best_hash_uint.data(), shared.best_hash.data()) < 0) {
+                    shared.best_hash = best_hash_uint;
+                    shared.best_nonce = std::string(
+                        reinterpret_cast<char*>(all_nonces.data() + best_idx * 32), NONCE_LEN);
                     ctx.matches_found.fetch_add(1);
 
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - shared.start_time).count();
 
                     std::cout << "\n[GPU " << ctx.device_index << "] NEW BEST FOUND!" << std::endl;
-                    std::cout << "  Hash: " << bytes_to_hex(found_hash.data(), 32) << std::endl;
-                    std::cout << "  Zeroes: " << count_leading_zeros(bytes_to_hex(found_hash.data(), 32)) << std::endl;
+                    std::cout << "  Hash: " << bytes_to_hex(all_hashes.data() + best_idx * 32, 32) << std::endl;
+                    std::cout << "  Zeroes: " << count_leading_zeros(bytes_to_hex(all_hashes.data() + best_idx * 32, 32)) << std::endl;
                     std::cout << "  Nonce: " << shared.best_nonce << std::endl;
                     std::cout << "  Challenge: " << shared.username << "/" << shared.best_nonce << std::endl;
                     std::cout << "  Time: " << elapsed << "s elapsed" << std::endl;
+                    std::cout << "  (Found " << found_count << " candidates this batch)" << std::endl;
                     std::cout << std::endl;
                 }
             }

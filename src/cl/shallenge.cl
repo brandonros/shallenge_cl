@@ -4,19 +4,21 @@
 // HASHES_PER_THREAD is passed via -D at kernel compile time
 // No fallback - kernel build will fail if not defined
 
+// Max results per kernel launch - more than enough given hit probability
+#define MAX_RESULTS 64
+
 __kernel void shallenge_mine(
     __global const uchar* restrict username,
     uint username_len,
     __global const uint* restrict target_hash,    // 8 uints (32 bytes as big-endian words)
     uint rng_seed,                                 // 32-bit random seed from host
-    __global uint* restrict found_count,           // atomic counter for matches found
-    __global uchar* restrict found_hash,           // 32 bytes - best hash found
-    __global uchar* restrict found_nonce,          // winning nonce (32 - username_len - 1 bytes)
-    __global uint* restrict found_thread_idx,      // which thread found it
+    __global uint* restrict found_count,           // atomic counter - also used as slot allocator
+    __global uchar* restrict found_hashes,         // [MAX_RESULTS * 32] bytes
+    __global uchar* restrict found_nonces,         // [MAX_RESULTS * 32] bytes (padded for simplicity)
     __local uint* restrict target_local            // local memory for target hash (8 uints)
 ) {
-    uint thread_idx = (uint)get_global_id(0);      // 32-bit thread index
-    int lid = get_local_id(0);
+    uint thread_idx = (uint)get_global_id(0);
+    uint lid = get_local_id(0);
 
     // Calculate nonce length from username length (total input must be 32 bytes)
     uint nonce_len = 31 - username_len;  // 32 - username_len - 1 (for '/')
@@ -27,7 +29,7 @@ __kernel void shallenge_mine(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // Initialize RNG state ONCE per thread (fully 32-bit)
+    // Initialize RNG state ONCE per thread
     uint s0, s1;
     init_rng_state(thread_idx, rng_seed, &s0, &s1);
 
@@ -40,33 +42,33 @@ __kernel void shallenge_mine(
 
     // Inner loop - hash multiple times per thread
     for (int iter = 0; iter < HASHES_PER_THREAD; iter++) {
-        // Generate nonce directly into input buffer (no separate nonce array)
         generate_nonce_from_state(&s0, &s1, &input[username_len + 1], nonce_len);
 
-        // Compute SHA-256
         uint hash[8];
         sha256_32_uint(input, hash);
 
-        // Check if this hash is better (compare directly against local memory)
         if (is_hash_better(hash, target_local)) {
-            atomic_inc(found_count);
+            // Atomically claim a slot
+            uint slot = atomic_inc(found_count);
 
-            // Write hash bytes directly to global memory (no temp array)
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                found_hash[i*4]     = (hash[i] >> 24);
-                found_hash[i*4 + 1] = (hash[i] >> 16);
-                found_hash[i*4 + 2] = (hash[i] >> 8);
-                found_hash[i*4 + 3] = hash[i];
+            if (slot < MAX_RESULTS) {
+                // Write to our unique slot - no races possible
+                __global uchar* hash_out = found_hashes + slot * 32;
+                __global uchar* nonce_out = found_nonces + slot * 32;
+
+                #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    hash_out[i*4]     = (hash[i] >> 24);
+                    hash_out[i*4 + 1] = (hash[i] >> 16);
+                    hash_out[i*4 + 2] = (hash[i] >> 8);
+                    hash_out[i*4 + 3] = hash[i];
+                }
+
+                for (uint i = 0; i < nonce_len; i++) {
+                    nonce_out[i] = input[username_len + 1 + i];
+                }
             }
-
-            // Copy nonce from input buffer
-            for (uint i = 0; i < nonce_len; i++) {
-                found_nonce[i] = input[username_len + 1 + i];
-            }
-
-            // Record which thread found it
-            *found_thread_idx = thread_idx;
+            // If slot >= MAX_RESULTS, we drop this result (extremely unlikely)
         }
     }
 }
