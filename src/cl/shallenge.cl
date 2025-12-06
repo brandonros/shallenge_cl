@@ -45,15 +45,8 @@ __kernel void shallenge_mine(
 
     // Inner loop - hash multiple times per thread
     for (int iter = 0; iter < HASHES_PER_THREAD; iter++) {
-        // Generate nonce using RNG state
-        uchar nonce[NONCE_LEN];
-        generate_nonce_from_state(&s0, &s1, nonce, NONCE_LEN);
-
-        // Copy nonce to input
-        #pragma unroll
-        for (uint i = 0; i < NONCE_LEN; i++) {
-            input[username_len + 1 + i] = nonce[i];
-        }
+        // Generate nonce directly into input buffer (no separate nonce array)
+        generate_nonce_from_state(&s0, &s1, &input[username_len + 1], NONCE_LEN);
 
         // Compute SHA-256
         uint hash[8];
@@ -63,20 +56,19 @@ __kernel void shallenge_mine(
         if (is_hash_better(hash, target)) {
             atomic_inc(found_count);
 
-            // Convert hash to bytes for output
-            uchar hash_bytes[32];
-            hash_uint_to_bytes(hash, hash_bytes);
-
-            // Copy hash (race condition is acceptable)
+            // Write hash bytes directly to global memory (no temp array)
             #pragma unroll
-            for (int i = 0; i < 32; i++) {
-                found_hash[i] = hash_bytes[i];
+            for (int i = 0; i < 8; i++) {
+                found_hash[i*4]     = (hash[i] >> 24);
+                found_hash[i*4 + 1] = (hash[i] >> 16);
+                found_hash[i*4 + 2] = (hash[i] >> 8);
+                found_hash[i*4 + 3] = hash[i];
             }
 
-            // Copy nonce
+            // Copy nonce from input buffer
             #pragma unroll
             for (int i = 0; i < NONCE_LEN; i++) {
-                found_nonce[i] = nonce[i];
+                found_nonce[i] = input[username_len + 1 + i];
             }
 
             // Record which thread found it

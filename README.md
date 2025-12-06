@@ -5,11 +5,11 @@ OpenCL + C++ = https://shallenge.quirino.net/
 
 ```shell
 export SSH_USERNAME="root"
-export SSH_PORT="40708"
-export SSH_HOST="108.236.147.253"
+export SSH_PORT="55779"
+export SSH_HOST="70.69.213.236"
 
 # sync files
-rsync -avz --exclude='.git' --exclude='.DS_Store' -e "ssh -p $SSH_PORT" ~/Desktop/shallenge_cl/ $SSH_USERNAME@$SSH_HOST:~/shallenge_cl
+rsync -avz --exclude='.git' --exclude='.DS_Store' -e "ssh -p $SSH_PORT" . $SSH_USERNAME@$SSH_HOST:/workspace/shallenge_cl
 
 # open shell
 ssh -p $SSH_PORT $SSH_USERNAME@$SSH_HOST
