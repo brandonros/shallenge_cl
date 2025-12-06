@@ -6,9 +6,17 @@ EXECUTABLE=shallenge_cl
 LDFLAGS=-framework OpenCL
 CFLAGS=-c -std=c++11 -Wall -O2
 
+# OpenCL kernel source files (order matters - dependencies first)
+CL_SOURCES=src/cl/sha256.cl src/cl/xoroshiro.cl src/cl/shallenge.cl
+
 all: src/kernel.h $(EXECUTABLE)
 
-src/kernel.h: src/kernel.cl
+# Concatenate .cl files into single kernel source
+src/kernel_combined.cl: $(CL_SOURCES)
+	cat $^ > $@
+
+# Generate header from combined kernel
+src/kernel.h: src/kernel_combined.cl
 	xxd -i $< > $@
 
 $(EXECUTABLE): $(OBJECTS)
@@ -18,4 +26,6 @@ $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(CFLAGS) $(CDEFINES) $< -o $@
 
 clean:
-	rm -rf src/*.o src/kernel.h $(EXECUTABLE)
+	rm -rf src/*.o src/kernel.h src/kernel_combined.cl $(EXECUTABLE)
+
+.PHONY: all clean
