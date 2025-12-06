@@ -170,7 +170,11 @@ bool initialize_gpu(GPUContext& ctx, cl_device_id device, int device_index, cons
     ctx.context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
     if (err != CL_SUCCESS) return false;
 
+#ifdef CL_VERSION_2_0
+    ctx.queue = clCreateCommandQueueWithProperties(ctx.context, device, nullptr, &err);
+#else
     ctx.queue = clCreateCommandQueue(ctx.context, device, 0, &err);
+#endif
     if (err != CL_SUCCESS) return false;
 
     const char* src = reinterpret_cast<const char*>(output_kernel_combined_cl);

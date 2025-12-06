@@ -1,10 +1,18 @@
 CC=g++
-CDEFINES=
+CDEFINES=-DCL_TARGET_OPENCL_VERSION=300
 SOURCES=src/main.cpp
 OUTDIR=output
 OBJECTS=$(OUTDIR)/main.o
 EXECUTABLE=$(OUTDIR)/shallenge_cl
-LDFLAGS=-framework OpenCL -pthread
+
+# Platform-specific flags
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    LDFLAGS=-framework OpenCL -pthread
+else
+    LDFLAGS=-lOpenCL -pthread
+endif
+
 CFLAGS=-c -std=c++11 -Wall -O2 -pthread
 
 # OpenCL kernel source files (order matters - dependencies first)
