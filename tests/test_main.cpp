@@ -13,52 +13,11 @@
 using namespace shallenge;
 
 // =============================================================================
-// Helper: Run GPU kernel with specific input, return hash
+// Test Helpers
 // =============================================================================
 namespace {
 
-// Run a single hash on GPU and return the result
-// Returns empty string on failure
-std::string gpu_sha256_single(GPUContext& ctx, const std::string& input) {
-    if (input.length() != 32) return "";  // Our kernel only handles 32-byte inputs
-
-    // Create a temporary buffer with the input
-    cl_int err;
-    CLBuffer input_buf(clCreateBuffer(ctx.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                       input.length(), (void*)input.c_str(), &err));
-    if (err != CL_SUCCESS) return "";
-
-    // Use permissive target (accept everything)
-    std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
-    cl_uint zero = 0;
-    cl_uint seed = 0;  // Doesn't matter for validation since we override input
-
-    clEnqueueWriteBuffer(ctx.queue, ctx.target_hash_buf, CL_FALSE, 0,
-                         8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
-    clEnqueueWriteBuffer(ctx.queue, ctx.found_count_buf, CL_FALSE, 0,
-                         sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-    clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &seed);
-
-    size_t global_size = 1;
-    size_t local_size = 1;
-    err = clEnqueueNDRangeKernel(ctx.queue, ctx.kernel, 1, nullptr,
-                                  &global_size, &local_size, 0, nullptr, nullptr);
-    if (err != CL_SUCCESS) return "";
-    clFinish(ctx.queue);
-
-    cl_uint found_count;
-    clEnqueueReadBuffer(ctx.queue, ctx.found_count_buf, CL_TRUE, 0,
-                        sizeof(cl_uint), &found_count, 0, nullptr, nullptr);
-
-    if (found_count == 0) return "";
-
-    std::vector<uint8_t> hash(32);
-    clEnqueueReadBuffer(ctx.queue, ctx.found_hashes_buf, CL_TRUE, 0, 32, hash.data(), 0, nullptr, nullptr);
-
-    return bytes_to_hex(hash.data(), 32);
-}
-
-// Get a GPU context for testing (returns nullptr if no GPU available)
+// Get a GPU context for testing (returns nullopt if no GPU available)
 std::optional<GPUContext> get_test_gpu() {
     auto devices = discover_all_gpus();
     if (devices.empty()) return std::nullopt;
@@ -256,7 +215,8 @@ TEST_CASE("GPU SHA-256 matches known test vectors", "[gpu][sha256]") {
         clEnqueueReadBuffer(gpu.queue, gpu.found_hashes_buf, CL_TRUE, 0, 32, hash.data(), 0, nullptr, nullptr);
 
         std::string hash_hex = bytes_to_hex(hash.data(), 32);
-        REQUIRE(hash_hex == "97ccae8eaf1245950067c7ed8d25ef7b17068c8930288ab6277ea058eeb73b49");
+        // Expected hash with improved RNG seeding (golden ratio multiplier)
+        REQUIRE(hash_hex == "f91db0d6b82e572f512302769cd22db910b9b8e09d96969f1fb29b4ce8aa3a4c");
     }
 }
 

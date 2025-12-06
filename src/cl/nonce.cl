@@ -22,12 +22,17 @@ inline uint splitmix32(uint x) {
 }
 
 // Initialize RNG state once per thread (fully 32-bit)
+// Uses non-commutative combination with golden ratio multiplier to:
+// 1. Avoid (seed=5, thread=3) == (seed=3, thread=5) collisions
+// 2. Space consecutive thread IDs far apart in state space
 inline void init_rng_state(uint thread_idx, uint rng_seed, uint* s0, uint* s1) {
-    uint seed = splitmix32(rng_seed ^ thread_idx);
-    *s0 = seed;
-    seed = splitmix32(seed);
-    *s1 = seed;
-    // Ensure non-zero state
+    uint mixed = splitmix32(rng_seed);
+    mixed = splitmix32(mixed + thread_idx * 0x9e3779b9u);  // golden ratio spreads threads
+
+    *s0 = mixed;
+    *s1 = splitmix32(mixed);
+
+    // Ensure non-zero state (xoroshiro requirement)
     if (*s0 == 0 && *s1 == 0) *s0 = 1;
 }
 

@@ -14,7 +14,7 @@ namespace shallenge {
 // Uses a fixed seed to get deterministic nonce, then checks hash matches expected
 [[nodiscard]] inline bool validate_gpu(GPUContext& ctx, const std::string& username) {
     // Expected hash for DEFAULT_USERNAME with seed 0x12345678, thread 0, first iteration
-    const char* expected_hash = "97ccae8eaf1245950067c7ed8d25ef7b17068c8930288ab6277ea058eeb73b49";
+    const char* expected_hash = "f91db0d6b82e572f512302769cd22db910b9b8e09d96969f1fb29b4ce8aa3a4c";
 
     // Permissive target - everything matches
     std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
