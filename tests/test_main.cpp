@@ -24,6 +24,12 @@ std::optional<GPUContext> get_test_gpu() {
     return create_gpu_context(devices[0], 0, config::username);
 }
 
+// Helper to set both seed arguments (64-bit seeding)
+void set_kernel_seeds(cl_kernel kernel, cl_uint seed_lo, cl_uint seed_hi = 0) {
+    clSetKernelArg(kernel, 3, sizeof(cl_uint), &seed_lo);
+    clSetKernelArg(kernel, 4, sizeof(cl_uint), &seed_hi);
+}
+
 } // anonymous namespace
 
 // =============================================================================
@@ -193,11 +199,12 @@ TEST_CASE("GPU SHA-256 matches known test vectors", "[gpu][sha256]") {
         cl_uint validation_seed = 0x12345678;
         cl_uint zero = 0;
 
+        cl_uint validation_seed_hi = 0x87654321;  // Second seed for 64-bit entropy
         clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
                              8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
         clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
                              sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-        clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &validation_seed);
+        set_kernel_seeds(gpu.kernel, validation_seed, validation_seed_hi);
 
         size_t global_size = 1;
         size_t local_size = 1;
@@ -215,8 +222,8 @@ TEST_CASE("GPU SHA-256 matches known test vectors", "[gpu][sha256]") {
         clEnqueueReadBuffer(gpu.queue, gpu.found_hashes_buf, CL_TRUE, 0, 32, hash.data(), 0, nullptr, nullptr);
 
         std::string hash_hex = bytes_to_hex(hash.data(), 32);
-        // Expected hash with improved RNG seeding (golden ratio multiplier)
-        REQUIRE(hash_hex == "f91db0d6b82e572f512302769cd22db910b9b8e09d96969f1fb29b4ce8aa3a4c");
+        // Expected hash with 64-bit RNG seeding (seed_lo=0x12345678, seed_hi=0x87654321, thread=0)
+        REQUIRE(hash_hex == "0c2af00a2a05ea3dd0f9c45fdcb396bf8a90c3fe94a62f5ecd29dfbf5019d4a9");
     }
 }
 
@@ -231,14 +238,14 @@ TEST_CASE("Different seeds produce different nonces", "[gpu][rng]") {
     std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
     std::vector<std::string> nonces;
 
-    // Run with 10 different seeds
+    // Run with 10 different seed pairs
     for (cl_uint seed = 0; seed < 10; seed++) {
         cl_uint zero = 0;
         clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
                              8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
         clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
                              sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-        clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &seed);
+        set_kernel_seeds(gpu.kernel, seed, seed * 0x9e3779b9u);
 
         size_t global_size = 1;
         size_t local_size = 1;
@@ -270,13 +277,12 @@ TEST_CASE("Target filtering works correctly", "[gpu][mining]") {
     SECTION("permissive target accepts all hashes") {
         std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
         cl_uint zero = 0;
-        cl_uint seed = 12345;
 
         clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
                              8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
         clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
                              sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-        clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &seed);
+        set_kernel_seeds(gpu.kernel, 12345, 67890);
 
         size_t global_size = 256;  // Run more threads
         size_t local_size = 256;
@@ -301,13 +307,12 @@ TEST_CASE("Target filtering works correctly", "[gpu][mining]") {
             0x00000000, 0x00000000, 0x00000000, 0x00000000
         };
         cl_uint zero = 0;
-        cl_uint seed = 12345;
 
         clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
                              8 * sizeof(cl_uint), restrictive_target.data(), 0, nullptr, nullptr);
         clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
                              sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-        clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &seed);
+        set_kernel_seeds(gpu.kernel, 12345, 67890);
 
         size_t global_size = 256;
         size_t local_size = 256;
@@ -340,13 +345,12 @@ TEST_CASE("Found hashes are actually better than target", "[gpu][mining][critica
         0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
     };
     cl_uint zero = 0;
-    cl_uint seed = 99999;
 
     clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
                          8 * sizeof(cl_uint), target.data(), 0, nullptr, nullptr);
     clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
                          sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-    clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &seed);
+    set_kernel_seeds(gpu.kernel, 99999, 88888);
 
     // Run enough threads to likely find some matches
     size_t global_size = 65536;
@@ -400,14 +404,14 @@ TEST_CASE("Nonce characters are valid base64", "[gpu][rng]") {
     std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
     std::set<char> seen_chars;
 
-    // Run with many different seeds to sample the character distribution
+    // Run with many different seed pairs to sample the character distribution
     for (cl_uint seed = 0; seed < 1000; seed++) {
         cl_uint zero = 0;
         clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
                              8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
         clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
                              sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-        clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &seed);
+        set_kernel_seeds(gpu.kernel, seed, seed ^ 0xDEADBEEF);
 
         size_t global_size = 1;
         size_t local_size = 1;
@@ -430,7 +434,7 @@ TEST_CASE("Nonce characters are valid base64", "[gpu][rng]") {
     REQUIRE(seen_chars.size() >= 50);  // At least ~78% coverage
 }
 
-TEST_CASE("Known result is reproducible from seed and thread index", "[gpu][reproducibility][critical]") {
+TEST_CASE("RNG is deterministic - same seeds produce same results", "[gpu][reproducibility][critical]") {
     auto gpu_opt = get_test_gpu();
     if (!gpu_opt) {
         WARN("No GPU available - skipping GPU tests");
@@ -438,76 +442,87 @@ TEST_CASE("Known result is reproducible from seed and thread index", "[gpu][repr
     }
     auto& gpu = *gpu_opt;
 
-    // Known good result from actual mining run:
-    // Seed: 0x2db3c8bf, ThreadIdx: 152577
-    // Hash: 00000000e26930bd9705edfac993fd780164a83dcf722b64cf7e0ee68a8b975a
-    // Nonce: Qcz7bqamNDiRNYb7Er7/A
-    const cl_uint known_seed = 0x2db3c8bf;
-    const cl_uint known_thread_idx = 152577;
-    const std::string expected_hash = "00000000e26930bd9705edfac993fd780164a83dcf722b64cf7e0ee68a8b975a";
-    const std::string expected_nonce = "Qcz7bqamNDiRNYb7Er7/A";
+    // Test that running with the same seeds twice produces identical results
+    const cl_uint seed_lo = 0xDEADBEEF;
+    const cl_uint seed_hi = 0xCAFEBABE;
 
-    // Use a target that will accept our 8-zero hash but reject most others
-    // This limits results so we don't overflow the 64-slot buffer before reaching our thread
-    std::vector<uint32_t> target = {
-        0x00000001, 0x00000000, 0x00000000, 0x00000000,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000
+    std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
+
+    auto run_kernel = [&]() -> std::pair<std::string, std::string> {
+        cl_uint zero = 0;
+        clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
+                             8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
+        clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
+                             sizeof(cl_uint), &zero, 0, nullptr, nullptr);
+        set_kernel_seeds(gpu.kernel, seed_lo, seed_hi);
+
+        size_t global_size = 256;
+        size_t local_size = 256;
+        clEnqueueNDRangeKernel(gpu.queue, gpu.kernel, 1, nullptr,
+                                &global_size, &local_size, 0, nullptr, nullptr);
+        clFinish(gpu.queue);
+
+        std::vector<uint8_t> hash(32);
+        std::vector<uint8_t> nonce(32);
+        clEnqueueReadBuffer(gpu.queue, gpu.found_hashes_buf, CL_TRUE, 0, 32, hash.data(), 0, nullptr, nullptr);
+        clEnqueueReadBuffer(gpu.queue, gpu.found_nonces_buf, CL_TRUE, 0, 32, nonce.data(), 0, nullptr, nullptr);
+
+        return {
+            bytes_to_hex(hash.data(), 32),
+            std::string(reinterpret_cast<char*>(nonce.data()), config::nonce_len)
+        };
     };
-    cl_uint zero = 0;
 
-    clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
-                         8 * sizeof(cl_uint), target.data(), 0, nullptr, nullptr);
-    clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
-                         sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-    clSetKernelArg(gpu.kernel, 3, sizeof(cl_uint), &known_seed);
+    // Run twice with same seeds
+    auto [hash1, nonce1] = run_kernel();
+    auto [hash2, nonce2] = run_kernel();
 
-    // Run enough threads to include our target thread
-    // Need at least known_thread_idx + 1 threads, round up to multiple of local_size
-    size_t global_size = ((known_thread_idx / 256) + 1) * 256;
-    size_t local_size = 256;
+    INFO("Run 1: hash=" << hash1 << " nonce=" << nonce1);
+    INFO("Run 2: hash=" << hash2 << " nonce=" << nonce2);
 
-    cl_int err = clEnqueueNDRangeKernel(gpu.queue, gpu.kernel, 1, nullptr,
-                                         &global_size, &local_size, 0, nullptr, nullptr);
-    REQUIRE(err == CL_SUCCESS);
-    clFinish(gpu.queue);
+    REQUIRE(hash1 == hash2);
+    REQUIRE(nonce1 == nonce2);
+}
 
-    // Read results
-    cl_uint found_count;
-    clEnqueueReadBuffer(gpu.queue, gpu.found_count_buf, CL_TRUE, 0,
-                        sizeof(cl_uint), &found_count, 0, nullptr, nullptr);
+TEST_CASE("Different seed_hi values produce different results", "[gpu][reproducibility]") {
+    auto gpu_opt = get_test_gpu();
+    if (!gpu_opt) {
+        WARN("No GPU available - skipping GPU tests");
+        return;
+    }
+    auto& gpu = *gpu_opt;
 
-    INFO("Found " << found_count << " results with restrictive target");
-    REQUIRE(found_count > 0);
+    // Test that changing seed_hi (while keeping seed_lo same) produces different results
+    // This verifies the 64-bit seeding is actually being used
+    const cl_uint seed_lo = 0x12345678;
 
-    size_t results_to_read = std::min(static_cast<size_t>(found_count), config::max_results);
-    std::vector<uint8_t> all_hashes(results_to_read * 32);
-    std::vector<uint8_t> all_nonces(results_to_read * 32);
-    std::vector<cl_uint> all_thread_ids(results_to_read);
+    std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
+    std::vector<std::string> nonces;
 
-    clEnqueueReadBuffer(gpu.queue, gpu.found_hashes_buf, CL_TRUE, 0,
-                        results_to_read * 32, all_hashes.data(), 0, nullptr, nullptr);
-    clEnqueueReadBuffer(gpu.queue, gpu.found_nonces_buf, CL_TRUE, 0,
-                        results_to_read * 32, all_nonces.data(), 0, nullptr, nullptr);
-    clEnqueueReadBuffer(gpu.queue, gpu.found_thread_ids_buf, CL_TRUE, 0,
-                        results_to_read * sizeof(cl_uint), all_thread_ids.data(), 0, nullptr, nullptr);
+    for (cl_uint seed_hi = 0; seed_hi < 5; seed_hi++) {
+        cl_uint zero = 0;
+        clEnqueueWriteBuffer(gpu.queue, gpu.target_hash_buf, CL_FALSE, 0,
+                             8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
+        clEnqueueWriteBuffer(gpu.queue, gpu.found_count_buf, CL_FALSE, 0,
+                             sizeof(cl_uint), &zero, 0, nullptr, nullptr);
+        set_kernel_seeds(gpu.kernel, seed_lo, seed_hi);
 
-    // Find our target thread in the results
-    bool found = false;
-    for (size_t i = 0; i < results_to_read; i++) {
-        if (all_thread_ids[i] == known_thread_idx) {
-            found = true;
-            std::string hash_hex = bytes_to_hex(all_hashes.data() + i * 32, 32);
-            std::string nonce_str(reinterpret_cast<char*>(all_nonces.data() + i * 32), config::nonce_len);
+        size_t global_size = 1;
+        size_t local_size = 1;
+        clEnqueueNDRangeKernel(gpu.queue, gpu.kernel, 1, nullptr,
+                                &global_size, &local_size, 0, nullptr, nullptr);
+        clFinish(gpu.queue);
 
-            INFO("Thread " << known_thread_idx << " produced:");
-            INFO("  Hash:  " << hash_hex);
-            INFO("  Nonce: " << nonce_str);
+        std::vector<uint8_t> nonce(32);
+        clEnqueueReadBuffer(gpu.queue, gpu.found_nonces_buf, CL_TRUE, 0, 32, nonce.data(), 0, nullptr, nullptr);
 
-            REQUIRE(hash_hex == expected_hash);
-            REQUIRE(nonce_str == expected_nonce);
-            break;
-        }
+        std::string nonce_str(reinterpret_cast<char*>(nonce.data()), config::nonce_len);
+        nonces.push_back(nonce_str);
+        INFO("seed_hi=" << seed_hi << " nonce=" << nonce_str);
     }
 
-    REQUIRE(found);  // Our thread must be in the results
+    // All nonces should be unique (verifies seed_hi actually affects output)
+    std::sort(nonces.begin(), nonces.end());
+    auto last = std::unique(nonces.begin(), nonces.end());
+    REQUIRE(last == nonces.end());  // No duplicates
 }

@@ -11,7 +11,8 @@ __kernel void shallenge_mine(
     __global const uchar* restrict username,
     uint username_len,
     __global const uint* restrict target_hash,    // 8 uints (32 bytes as big-endian words)
-    uint rng_seed,                                 // 32-bit random seed from host
+    uint rng_seed_lo,                              // Low 32 bits of 64-bit seed
+    uint rng_seed_hi,                              // High 32 bits of 64-bit seed
     __global uint* restrict found_count,           // atomic counter - also used as slot allocator
     __global uchar* restrict found_hashes,         // [MAX_RESULTS * 32] bytes
     __global uchar* restrict found_nonces,         // [MAX_RESULTS * 32] bytes (padded for simplicity)
@@ -30,9 +31,9 @@ __kernel void shallenge_mine(
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // Initialize RNG state ONCE per thread
+    // Initialize RNG state ONCE per thread (full 64-bit entropy)
     uint s0, s1;
-    init_rng_state(thread_idx, rng_seed, &s0, &s1);
+    init_rng_state(thread_idx, rng_seed_lo, rng_seed_hi, &s0, &s1);
 
     // Prepare input buffer with username prefix (doesn't change)
     uchar input[32];

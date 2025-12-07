@@ -26,14 +26,17 @@ inline void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
             current_target = shared.best_hash;
         }
 
-        cl_uint rng_seed = static_cast<cl_uint>(ctx.rng());
+        // Generate two 32-bit seeds for full 64-bit RNG state entropy
+        cl_uint rng_seed_lo = static_cast<cl_uint>(ctx.rng());
+        cl_uint rng_seed_hi = static_cast<cl_uint>(ctx.rng());
 
         // Reset found count and update target
         cl_uint zero = 0;
         clEnqueueWriteBuffer(ctx.queue, ctx.found_count_buf, CL_FALSE, 0, sizeof(cl_uint), &zero, 0, nullptr, nullptr);
         clEnqueueWriteBuffer(ctx.queue, ctx.target_hash_buf, CL_FALSE, 0, 8 * sizeof(cl_uint), current_target.data(), 0, nullptr, nullptr);
 
-        clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &rng_seed);
+        clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &rng_seed_lo);
+        clSetKernelArg(ctx.kernel, 4, sizeof(cl_uint), &rng_seed_hi);
 
         size_t global_size = config::global_size;
         size_t local_size = config::local_size;
@@ -98,7 +101,7 @@ inline void gpu_worker_thread(GPUContext& ctx, SharedState& shared) {
                     std::cout << "  Zeroes: " << count_leading_zeros(bytes_to_hex(all_hashes.data() + best_idx * 32, 32)) << std::endl;
                     std::cout << "  Nonce: " << shared.best_nonce << std::endl;
                     std::cout << "  Challenge: " << shared.username << "/" << shared.best_nonce << std::endl;
-                    std::cout << "  Seed: 0x" << std::hex << rng_seed << std::dec
+                    std::cout << "  Seed: 0x" << std::hex << rng_seed_hi << rng_seed_lo << std::dec
                               << ", ThreadIdx: " << all_thread_ids[best_idx] << std::endl;
                     std::cout << "  Time: " << elapsed << "s elapsed" << std::endl;
                     std::cout << "  (Found " << found_count << " candidates this batch)" << std::endl;

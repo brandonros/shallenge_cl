@@ -11,23 +11,25 @@
 namespace shallenge {
 
 // Validate GPU kernel produces correct SHA-256 output
-// Uses a fixed seed to get deterministic nonce, then checks hash matches expected
+// Uses fixed seeds to get deterministic nonce, then checks hash matches expected
 [[nodiscard]] inline bool validate_gpu(GPUContext& ctx, const std::string& username) {
-    // Expected hash for DEFAULT_USERNAME with seed 0x12345678, thread 0, first iteration
-    const char* expected_hash = "f91db0d6b82e572f512302769cd22db910b9b8e09d96969f1fb29b4ce8aa3a4c";
+    // Expected hash for DEFAULT_USERNAME with seed_lo=0x12345678, seed_hi=0x87654321, thread 0
+    const char* expected_hash = "ce91f7b53a42205289d1438afcd3c302c7d1f658099a70d81286676e60d4417b";
 
     // Permissive target - everything matches
     std::vector<uint32_t> permissive_target(8, 0xFFFFFFFF);
 
-    // Fixed seed for deterministic nonce generation
-    cl_uint validation_seed = 0x12345678;
+    // Fixed seeds for deterministic nonce generation (64-bit entropy)
+    cl_uint validation_seed_lo = 0x12345678;
+    cl_uint validation_seed_hi = 0x87654321;
     cl_uint zero = 0;
 
     clEnqueueWriteBuffer(ctx.queue, ctx.target_hash_buf, CL_FALSE, 0,
                          8 * sizeof(cl_uint), permissive_target.data(), 0, nullptr, nullptr);
     clEnqueueWriteBuffer(ctx.queue, ctx.found_count_buf, CL_FALSE, 0,
                          sizeof(cl_uint), &zero, 0, nullptr, nullptr);
-    clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &validation_seed);
+    clSetKernelArg(ctx.kernel, 3, sizeof(cl_uint), &validation_seed_lo);
+    clSetKernelArg(ctx.kernel, 4, sizeof(cl_uint), &validation_seed_hi);
 
     // Run single work item
     size_t global_size = 1;
@@ -58,7 +60,7 @@ namespace shallenge {
     std::string hash_hex = bytes_to_hex(hash.data(), 32);
     std::string nonce_str(reinterpret_cast<char*>(nonce.data()), config::nonce_len);
 
-    std::cout << "[GPU " << ctx.device_index << "] Validation (seed=0x" << std::hex << validation_seed << std::dec << "): "
+    std::cout << "[GPU " << ctx.device_index << "] Validation (seed=0x" << std::hex << validation_seed_hi << validation_seed_lo << std::dec << "): "
               << username << "/" << nonce_str << " -> " << hash_hex << std::endl;
 
     if (hash_hex != expected_hash) {

@@ -212,12 +212,13 @@ struct GPUContext {
     clSetKernelArg(ctx.kernel, 0, sizeof(cl_mem), &username_mem);
     clSetKernelArg(ctx.kernel, 1, sizeof(cl_uint), &username_len);
     clSetKernelArg(ctx.kernel, 2, sizeof(cl_mem), &target_mem);
-    // arg 3 (rng_seed) set per launch
-    clSetKernelArg(ctx.kernel, 4, sizeof(cl_mem), &count_mem);
-    clSetKernelArg(ctx.kernel, 5, sizeof(cl_mem), &hashes_mem);
-    clSetKernelArg(ctx.kernel, 6, sizeof(cl_mem), &nonces_mem);
-    clSetKernelArg(ctx.kernel, 7, sizeof(cl_mem), &thread_ids_mem);
-    clSetKernelArg(ctx.kernel, 8, sizeof(cl_uint) * 8, nullptr);  // local memory for target
+    // arg 3 (rng_seed_lo) set per launch
+    // arg 4 (rng_seed_hi) set per launch
+    clSetKernelArg(ctx.kernel, 5, sizeof(cl_mem), &count_mem);
+    clSetKernelArg(ctx.kernel, 6, sizeof(cl_mem), &hashes_mem);
+    clSetKernelArg(ctx.kernel, 7, sizeof(cl_mem), &nonces_mem);
+    clSetKernelArg(ctx.kernel, 8, sizeof(cl_mem), &thread_ids_mem);
+    clSetKernelArg(ctx.kernel, 9, sizeof(cl_uint) * 8, nullptr);  // local memory for target
 
     // Seed RNG
     std::random_device rd;
